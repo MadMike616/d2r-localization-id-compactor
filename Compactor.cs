@@ -7,16 +7,16 @@ using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
-using System.Web.Script.Serialization;
+using System.Text.Json;
 
 [assembly: AssemblyTitle("D2R Localization ID Compactor")]
-[assembly: AssemblyDescription("Portable localization ID compactor with vanilla preservation and backups")]
+[assembly: AssemblyDescription("Localization ID compaction and optional Chronicle save ID repair with verified backups")]
 [assembly: AssemblyCompany("MadMike")]
 [assembly: AssemblyProduct("D2R Localization ID Compactor")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 MadMike")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
-[assembly: AssemblyInformationalVersion("1.1.0")]
+[assembly: AssemblyVersion("1.6.1.0")]
+[assembly: AssemblyFileVersion("1.6.1.0")]
+[assembly: AssemblyInformationalVersion("1.6.1")]
 
 namespace D2RLocalizationCompactor
 {
@@ -264,6 +264,7 @@ namespace D2RLocalizationCompactor
         public readonly List<Change> Mapping = new List<Change>();
         public readonly Dictionary<int, List<string>> VanillaDuplicates = new Dictionary<int, List<string>>();
         public string Backup;
+        public bool EditSaves;
     }
 
     internal static class Engine
@@ -298,13 +299,13 @@ namespace D2RLocalizationCompactor
             if (boundary.Parent == null) throw new InvalidDataException("Choose a backup folder outside the target using --backup-folder.");
             return System.IO.Path.Combine(boundary.Parent.FullName, "Localization-ID-Backups");
         }
-        private static void ValidateBackupRoot(string target, string backup)
+        public static void ValidateBackupRoot(string target, string backup)
         {
             if (Within(backup, DataBoundary(target).FullName)) throw new InvalidDataException("The backup folder must be outside the localization/game-data tree. Choose a folder outside strings, data and any containing .mpq folder.");
             for (DirectoryInfo current = new DirectoryInfo(backup); current != null; current = current.Parent)
                 if (current.Exists && (current.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("Backup paths must not use links/reparse points: " + current.FullName);
         }
-        private static string FindLegacyBackup(string target)
+        public static string FindLegacyBackup(string target)
         {
             string root = System.IO.Path.Combine(target, "Localization-ID-Backups");
             if (!Directory.Exists(root)) return null;
@@ -464,7 +465,7 @@ namespace D2RLocalizationCompactor
                     Console.WriteLine("item-runes.json stays unchanged. Other custom ranges avoid every item-runes ID and 1000 numbers on either side.");
                     foreach (IdRange buffer in plan.RuneBuffers) Console.WriteLine("  Reserved ID interval: " + buffer.First + "-" + buffer.Last);
                 }
-                else Console.WriteLine("COMPACT is for a clean mod with NO existing character or shared-stash saves. Runeword name IDs stored in saved items can become invalid.");
+                else Console.WriteLine(plan.EditSaves ? "Runeword IDs will be migrated together with all supported saves in this mod's save profile." : "COMPACT is for a clean mod with NO existing character or shared-stash saves. Runeword name IDs stored in saved items can become invalid.");
             }
             Console.WriteLine("\nFile                            Custom range          IDs changing");
             foreach (Document doc in plan.Documents)
@@ -482,11 +483,17 @@ namespace D2RLocalizationCompactor
             if (value.Length > 0 && "=+-@".IndexOf(value[0]) >= 0) value = "'" + value;
             return "\"" + value.Replace("\"", "\"\"") + "\"";
         }
+        public static byte[] MappingBytes(Plan plan)
+        {
+            var text = new StringBuilder("File,EntryIndex,Key,OldID,NewID\r\n");
+            foreach (Change change in plan.Mapping) text.Append(Csv(change.File)).Append(',').Append(change.Index).Append(',').Append(Csv(change.Key)).Append(',').Append(change.OldId).Append(',').Append(change.NewId).Append("\r\n");
+            return new UTF8Encoding(true).GetPreamble().Concat(new UTF8Encoding(false).GetBytes(text.ToString())).ToArray();
+        }
         private static void WriteNew(string path, byte[] bytes)
         {
             using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { stream.Write(bytes, 0, bytes.Length); stream.Flush(true); }
         }
-        private static void SnapshotStillMatches(Plan plan)
+        public static void SnapshotStillMatches(Plan plan)
         {
             string[] files = JsonFiles(plan.Target);
             if (!files.SequenceEqual(plan.Documents.Select(d => d.Path), StringComparer.OrdinalIgnoreCase)) throw new IOException("The target JSON file list changed after preview. Run the tool again.");
@@ -494,7 +501,7 @@ namespace D2RLocalizationCompactor
         }
         private static object Manifest(Plan plan, string status, string message)
         {
-            return new { tool = "D2R Localization ID Compactor", version = "1.1.0", utc = DateTime.UtcNow.ToString("o"),
+            return new { tool = "D2R Localization ID Compactor", version = "1.6.1", utc = DateTime.UtcNow.ToString("o"),
                 status = status, message = message, target = plan.Target, reference = plan.Reference.Description,
                 startingId = plan.Start, minimumBoundaryDistance = 300, changedIds = plan.Changed, backupRoot = plan.BackupRoot,
                 itemRunesMode = plan.ItemRunesMode.ToString().ToLowerInvariant(), itemRunesBuffer = plan.ItemRunesMode == ItemRunesMode.Preserve ? RuneBuffer : 0,
@@ -503,7 +510,7 @@ namespace D2RLocalizationCompactor
                     records = d.Records == null ? 0 : d.Records.Count, changingIds = d.Changed, firstCustomId = d.First, lastCustomId = d.Last, skipped = d.SkipReason }).ToArray(),
                 preservedVanillaDuplicateGroups = plan.VanillaDuplicates.ToDictionary(p => p.Key.ToString(CultureInfo.InvariantCulture), p => p.Value) };
         }
-        public static string Json(object value) { return new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 256 }.Serialize(value); }
+        public static string Json(object value) { return JsonSerializer.Serialize(value, new JsonSerializerOptions { MaxDepth = 256 }); }
         private static void SaveManifest(Plan plan, string status, string message)
         {
             File.WriteAllText(System.IO.Path.Combine(plan.Backup, "manifest.json"), Json(Manifest(plan, status, message)), new UTF8Encoding(false));
@@ -598,6 +605,19 @@ namespace D2RLocalizationCompactor
     {
         private static string Folder(string input) { return System.IO.Path.GetFullPath(Environment.ExpandEnvironmentVariables(input.Trim().Trim('"'))); }
         private static string Ask(string label, string value) { Console.Write(label + " [" + value + "]: "); string answer = Console.ReadLine(); return string.IsNullOrWhiteSpace(answer) ? value : answer.Trim(); }
+        private static bool Confirm(string action)
+        {
+            for (;;)
+            {
+                Console.Write("\n" + action + " Continue? [Y/N] (no default): ");
+                string answer = Console.ReadLine();
+                if (answer == null) return false;
+                answer = answer.Trim();
+                if (answer.Equals("Y", StringComparison.OrdinalIgnoreCase) || answer.Equals("YES", StringComparison.OrdinalIgnoreCase)) return true;
+                if (answer.Equals("N", StringComparison.OrdinalIgnoreCase) || answer.Equals("NO", StringComparison.OrdinalIgnoreCase)) return false;
+                Console.WriteLine("Enter Y/YES or N/NO. There is no default.");
+            }
+        }
         private static ItemRunesMode ParseItemRunesMode(string value)
         {
             if (string.Equals(value.Trim(), "preserve", StringComparison.OrdinalIgnoreCase) || value.Trim() == "1") return ItemRunesMode.Preserve;
@@ -619,44 +639,251 @@ namespace D2RLocalizationCompactor
         }
         private static void Help()
         {
-            Console.WriteLine("D2R Localization ID Compactor 1.1.0 - MadMike\n");
-            Console.WriteLine("Double-click to choose a folder, preview the ranges, then type APPLY to proceed.");
+            Console.WriteLine("D2R Localization ID Compactor 1.6.1 - MadMike\n");
+            Workflow.Menu();
+            Console.WriteLine("\n--mode standard|skip-runewords|compact-and-edit-saves|save-only (or 1, 2, 3, 4) selects the same workflow for automation.\nMode 3 generates and uses its mapping automatically, validates every save first,\nand backs up JSON plus saves together. A failure triggers recovery of both.\nThe --repair-items/--repair-chronicle commands below remain advanced recovery\ncommands for files compacted earlier; they are separate from the four main menu options.");
+            Console.WriteLine("Double-click to select a workflow and preview it. Final confirmation: Y/YES\nto continue, N/NO to cancel (any letter case). No default; blank/invalid asks again.\nClose the game/loader before applying.");
             Console.WriteLine("The default target is the folder containing this executable.");
-            Console.WriteLine("\nOptions:\n  --target FOLDER    Target folder (direct .json children only)\n  --vanilla FOLDER   Use a fresh vanilla strings extraction instead of built-in 3.4\n  --backup-folder FOLDER  Backup root outside localization/game data\n  --item-runes-mode preserve|compact  Required if item-runes.json has numeric IDs\n  --start NUMBER     First custom ID (default 30000, or above a newer reference)\n  --dry-run          Preview only; write nothing\n  --apply --yes      Apply without an interactive prompt; backups remain mandatory\n  --help            Show this help\n\nPRESERVE keeps item-runes.json unchanged with a 1000-ID buffer on both sides of every ID.\nCOMPACT renumbers its custom IDs too; use only for a clean mod with no character/shared-stash saves.\nOption names, mode values and APPLY ignore letter case.\nThe seven established filenames come first; additional filenames follow alphabetically.\nCustom IDs stop at 65534 for native 16-bit field compatibility.\nMalformed JSON, ambiguous vanilla duplicates, range overflow and concurrent edits abort.\nOnly the known vanilla outlier 251780 is excluded from the maximum calculation; it stays reserved.");
+            Console.WriteLine("\nOptions:\n  --target FOLDER    Target folder (direct .json children only)\n  --vanilla FOLDER   Use a fresh vanilla strings extraction instead of built-in 3.4\n  --backup-folder FOLDER  Backup root outside localization/game data\n  --item-runes-mode preserve|compact  Legacy JSON-only CLI; never with --mode\n  --start NUMBER     First custom ID (default 30000, or above a newer reference)\n  --dry-run          Preview only; write nothing\n  --apply --yes      Apply without an interactive prompt; backups remain mandatory\n  --help            Show this help\n\nPRESERVE keeps item-runes.json unchanged with a 1000-ID buffer on both sides of every ID.\nCOMPACT renumbers its custom IDs too; use only for a clean mod with no character/shared-stash saves.\nOption names, mode values and Y/YES/N/NO confirmations ignore letter case.\nThe seven established filenames come first; additional filenames follow alphabetically.\nCustom IDs stop at 65534 for native 16-bit field compatibility.\nMalformed JSON, ambiguous vanilla duplicates, range overflow and concurrent edits abort.\nOnly the known vanilla outlier 251780 is excluded from the maximum calculation; it stays reserved.");
+            Console.WriteLine("\nSeparate optional SAVE FILE EDIT action:\n  --repair-chronicle  Repair Chronicle runeword history in ONE .d2i shared-stash SAVE\n  --save-file FILE    The .d2i SAVE FILE to edit in place\n  --mapping FILE      old-to-new-ids.csv from the relevant item-runes compaction\nUse --dry-run to preview, or --apply --yes to EDIT THE SAVE with mandatory backups.\nDo not combine repair with --target, --vanilla, --start or --item-runes-mode.\nClose the game and save editors first. Only modern format 2 / save version 105,\nChronicle version 1 with 64 trailing bytes is supported. Ambiguous maps abort.\nThis repairs discovery history only, not stored items or character saves.\nFinal save-edit confirmation accepts Y/YES or N/NO (any letter case). See README before use.");
+            Console.WriteLine("\nOptional ITEM SAVE FILE EDIT action:\n  --repair-items      Repair runeword items in .d2s characters / .d2i stashes\n  --save-file FILE    Select a save; repeat for multiple explicit files\n  --save-folder FOLDER  Instead, select ALL direct .d2s/.d2i files (no recursion)\n  --mod-tables FOLDER  This mod's complete effective data/global/excel tables\n  --mapping FILE     Matching old-to-new-ids.csv\n  --include-chronicle  Also repair Chronicle history in selected stashes\nUse --dry-run first, or --apply --yes to EDIT SAVES with mandatory backups.\nOnly save version 105 / modern stash format 2 is supported. ALL selected saves\nare validated and backed up before the first replacement. Only ID fields and\nnecessary character checksums change. Final confirmation: Y/YES or N/NO, with no default.\nUnknown IDs stay unchanged; invalid/ambiguous input aborts the whole batch.");
+            Console.WriteLine("\nMode 4 / EDIT SAVE FILES ONLY:\n  Reads current item-runes.json and leaves active JSON unchanged.\n  Automatically reads this mod's Localization-ID-Backups mappings and rune snapshots\n  to identify old saved numeric IDs by exact string key. No CSV selection needed.\n  --history-folder FOLDER  Override the mod-local historical backup folder.\n  Unknown/reused/conflicting IDs stop the whole batch rather than being guessed.\n  Migrates physical runewords and Chronicle history; keeps drop-source IDs unchanged.\n  Final confirmation: Y/YES or N/NO; verifies all selected save/context backups first.");
+            Console.WriteLine("\nWindows x64 portable EXE with bundled runtime. --licenses displays embedded software notices.");
+            Console.WriteLine("\nAutomatic mod/save paths:\n  --mod-folder FOLDER  Select the mod if the EXE is stored elsewhere\n  --detect-paths       Show detected mod, save folder and mod-table folder; read only\n  --auto-saves         Use modinfo.json's detected save folder for a repair\n                      ITEMS: all direct .d2s/.d2i saves. Chronicle-only: one .d2i\n                      must exist, otherwise select --save-file explicitly.\nModes 3 and 4 select ALL direct saves in the detected profile.\nMode 3 generates its own mapping. Mode 4 resolves historical aliases by string key.\nSave/table folders can be overridden manually.\nWindows supplies the Saved Games location; no username/mod name is hardcoded.\nAdvanced repair commands require a CSV matching the save's ID history. Backups and explicit\nsave-edit confirmations remain mandatory. Changed modinfo.json aborts the plan.");
+        }
+        private static bool SamePath(string first, string second)
+        {
+            return first != null && second != null && string.Equals(Folder(first).TrimEnd('\\', '/'), Folder(second).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
+        }
+        private static void RunWorkflow(WorkflowMode mode, string target, bool explicitTarget, string vanilla, int? start, string backup,
+            string saveFolder, string tables, string historyFolder, ModPaths paths, bool interactive, bool dry, bool yes)
+        {
+            string suggested = paths.ContentFolder == null ? target : System.IO.Path.Combine(paths.ContentFolder, "data", "local", "lng", "strings");
+            if (!explicitTarget && Directory.Exists(suggested)) target = suggested;
+            if (interactive && (!Directory.Exists(target) || !Directory.GetFiles(target).Any(p => p.EndsWith(".json", StringComparison.OrdinalIgnoreCase)))) target = Ask("Target strings folder", "");
+            target = Folder(target);
+            ModPaths targetPaths = ModPaths.Discover(target);
+            if (paths.ModInfo == null && targetPaths.ModInfo != null) paths = targetPaths;
+            if ((mode == WorkflowMode.CompactAndEditSaves || mode == WorkflowMode.EditSaveFilesOnly) && targetPaths.ModInfo != null && paths.ModInfo != null && !SamePath(targetPaths.ModInfo.Path, paths.ModInfo.Path))
+                throw new ArgumentException("The target JSON and detected save profile belong to different mods. Select matching --target and --mod-folder paths.");
+            if (vanilla != null) vanilla = Folder(vanilla);
+            if (SamePath(target, vanilla)) throw new ArgumentException("Target and vanilla reference must be different folders.");
+            Reference reference = Reference.Load(vanilla);
+            if (mode == WorkflowMode.EditSaveFilesOnly)
+            {
+                if (start.HasValue) throw new ArgumentException("Mode 4 does not assign JSON IDs; do not supply --start.");
+                paths.Print();
+                if (interactive && historyFolder == null)
+                {
+                    string detectedHistory = Engine.DefaultBackupRoot(target);
+                    string selectedHistory = Ask("Historical backups folder (old mappings/rune snapshots)", detectedHistory);
+                    if (!SamePath(selectedHistory, detectedHistory)) historyFolder = selectedHistory;
+                }
+                if (saveFolder == null) saveFolder = paths.SaveFolder;
+                if (saveFolder == null && interactive) saveFolder = Ask("Mod save folder (automatic detection unavailable)", "");
+                if (string.IsNullOrWhiteSpace(saveFolder)) throw new ArgumentException(paths.SaveError ?? paths.ModError ?? "Select the mod's save folder. No files were changed.");
+                if (tables == null) tables = paths.TablesFolder;
+                if (tables == null && Directory.Exists(Folder(saveFolder)) && ModPaths.Saves(Folder(saveFolder), false).Length > 0 && interactive)
+                    tables = Ask("Complete effective mod-table folder (five TXT files)", "");
+                SaveOnlyPlan saveOnly = SaveOnly.Build(target, Folder(saveFolder), string.IsNullOrWhiteSpace(tables) ? null : Folder(tables), backup == null ? null : Folder(backup), historyFolder == null ? null : Folder(historyFolder), paths.ModInfo, reference);
+                SaveOnly.Preview(saveOnly);
+                if (dry) { Console.WriteLine("\nPreview only. No files were written."); return; }
+                if (!yes)
+                {
+                    if (Console.IsInputRedirected) throw new ArgumentException("Use --dry-run to preview, or --apply --yes to edit saves with mandatory backups.");
+                    if (!Confirm("Back up all selected saves and EDIT SAVE FILES ONLY.")) { Console.WriteLine("Cancelled. No files were written."); return; }
+                }
+                Workflow.RequireGameClosed(); SaveOnly.Apply(saveOnly); return;
+            }
+            long suggestedStart = Math.Max(30000L, (((long)reference.Maximum + 1 + 999) / 1000) * 1000);
+            if (!start.HasValue) { if (suggestedStart > Engine.MaximumId) throw new InvalidDataException("No supported custom ID range remains."); start = (int)suggestedStart; }
+            Plan localization = Engine.Build(target, reference, start.Value, backup == null ? null : Folder(backup), mode == WorkflowMode.SkipRunewords ? ItemRunesMode.Preserve : ItemRunesMode.Compact);
+            WorkflowPlan combined = null;
+            if (mode == WorkflowMode.CompactAndEditSaves)
+            {
+                paths.Print();
+                if (saveFolder == null) saveFolder = paths.SaveFolder;
+                if (saveFolder == null && interactive) saveFolder = Ask("Mod save folder (automatic detection unavailable)", "");
+                if (string.IsNullOrWhiteSpace(saveFolder)) throw new ArgumentException(paths.SaveError ?? paths.ModError ?? "Select the mod's save folder. No JSON or saves were changed.");
+                if (tables == null) tables = paths.TablesFolder;
+                if (tables == null && Directory.Exists(Folder(saveFolder)) && ModPaths.Saves(Folder(saveFolder), false).Length > 0 && interactive)
+                    tables = Ask("Complete effective mod-table folder (five TXT files)", "");
+                combined = Workflow.Build(localization, Folder(saveFolder), string.IsNullOrWhiteSpace(tables) ? null : Folder(tables), paths.ModInfo);
+                Workflow.Preview(combined);
+            }
+            else
+            {
+                Console.WriteLine("\nSelected: " + (mode == WorkflowMode.Standard ? "STANDARD COMP" : "SKIP RUNEWORDS") + ". No save files will be edited.");
+                Engine.Preview(localization);
+            }
+            if (dry) { Console.WriteLine("\nPreview only. No files were written."); return; }
+            if (!yes)
+            {
+                if (Console.IsInputRedirected) throw new ArgumentException("Use --dry-run to preview, or --apply --yes to apply this workflow with mandatory backups.");
+                if (!Confirm(mode == WorkflowMode.CompactAndEditSaves ? "Back up all inputs, compact JSON and EDIT SAVES." : "Back up scanned JSON and apply this compaction plan.")) { Console.WriteLine("Cancelled. No files were written."); return; }
+            }
+            Workflow.RequireGameClosed();
+            if (combined != null) Workflow.Apply(combined); else Engine.Apply(localization);
+        }
+        private static string PickSave(ModPaths paths, bool stashOnly, out bool detected)
+        {
+            detected = false;
+            if (paths.SaveFolderExists)
+            {
+                string[] files = ModPaths.Saves(paths.SaveFolder, stashOnly);
+                if (files.Length > 0)
+                {
+                    Console.WriteLine("\nAvailable " + (stashOnly ? "shared-stash saves" : "character/shared-stash saves") + " in " + paths.SaveFolder + ":");
+                    for (int i = 0; i < files.Length; ++i) Console.WriteLine("  {0}: {1}", i + 1, System.IO.Path.GetFileName(files[i]));
+                    Console.WriteLine("  M / MANUAL: Enter a different save-file path");
+                    for (;;)
+                    {
+                        Console.Write(files.Length == 1 ? "Choose save [1]: " : "Choose save number or MANUAL: ");
+                        string raw = Console.ReadLine(); if (raw == null) throw new ArgumentException("No save selected. No files were changed.");
+                        string answer = raw.Trim(); if (answer.Length == 0 && files.Length == 1) answer = "1";
+                        if (answer.Equals("M", StringComparison.OrdinalIgnoreCase) || answer.Equals("MANUAL", StringComparison.OrdinalIgnoreCase)) break;
+                        int number;
+                        if (int.TryParse(answer, NumberStyles.None, CultureInfo.InvariantCulture, out number) && number >= 1 && number <= files.Length)
+                        { paths.ModInfo.Verify(); detected = true; return files[number - 1]; }
+                        Console.WriteLine("Choose a listed save number, or MANUAL.");
+                    }
+                }
+                else Console.WriteLine("No matching saves were found in the detected folder. Enter a different file manually.");
+            }
+            return Ask(stashOnly ? "Shared-stash SAVE FILE (.d2i)" : "SAVE FILE (.d2s or .d2i)", "");
+        }
+        private static void Repair(string save, string mapping, string backup, bool interactive, bool dry, bool yes, ModPaths paths, bool autoSaves)
+        {
+            Console.WriteLine("\nWARNING: CHRONICLE REPAIR EDITS A .d2i SHARED-STASH SAVE FILE IN PLACE.");
+            Console.WriteLine("Close the game and all save editors. Read the README's SAVE FILE EDIT section before applying.");
+            bool detected = false;
+            if (autoSaves)
+            {
+                paths.Print(); string[] files = ModPaths.Saves(paths.RequireSaveFolder(), true);
+                if (files.Length != 1) throw new ArgumentException("--auto-saves needs exactly one shared-stash .d2i for Chronicle-only repair; found " + files.Length + ". Choose --save-file explicitly or use the interactive numbered list.");
+                save = files[0]; detected = true;
+            }
+            if (interactive)
+            {
+                paths.Print(); save = PickSave(paths, true, out detected);
+                mapping = Ask("Matching old-to-new-ids.csv from the run that changed item-runes IDs", "");
+            }
+            if (string.IsNullOrWhiteSpace(save) || string.IsNullOrWhiteSpace(mapping)) throw new ArgumentException("Chronicle repair requires --save-file and --mapping (or their interactive paths).");
+            save = Folder(save); mapping = Folder(mapping);
+            string suggestedBackup = detected ? paths.DefaultBackupRoot() : Engine.DefaultBackupRoot(System.IO.Path.GetDirectoryName(save));
+            if (interactive) backup = Ask("SAVE backup folder (outside the save/game-data folder)", suggestedBackup);
+            else if (backup == null && detected) backup = suggestedBackup;
+            ChroniclePlan plan = ChronicleRepair.Build(save, mapping, backup == null ? null : Folder(backup));
+            if (detected)
+            {
+                paths.ModInfo.Verify(); plan.DetectedModInfo = paths.ModInfo;
+                Engine.ValidateBackupRoot(System.IO.Path.Combine(paths.ContentFolder, "data"), plan.BackupRoot);
+            }
+            ChronicleRepair.Preview(plan);
+            if (dry) Console.WriteLine("\nPreview only. No files were written; the save was not edited.");
+            else if (plan.Changes.Count == 0) Console.WriteLine("\nNo mapped Chronicle IDs need repair. The save was not edited. Unmapped IDs are not validated.");
+            else
+            {
+                if (!yes)
+                {
+                    if (Console.IsInputRedirected) throw new ArgumentException("Use --dry-run to preview, or --apply --yes to EDIT THE SAVE FILE with mandatory backups.");
+                    if (!Confirm("Back up and EDIT the .d2i SAVE FILE shown above.")) { Console.WriteLine("Cancelled. No save file was edited."); return; }
+                }
+                ChronicleRepair.Apply(plan);
+            }
+        }
+        private static void RepairItems(List<string> saves, string folder, string mapping, string tables, string backup, bool history, bool interactive, bool dry, bool yes, ModPaths paths, bool autoSaves, bool explicitMod)
+        {
+            Console.WriteLine("\nWARNING: ITEM REPAIR EDITS CHARACTER/STASH SAVE FILES IN PLACE. Close the game and save editors.");
+            bool detected = false;
+            if (autoSaves) { paths.Print(); folder = paths.RequireSaveFolder(); detected = true; }
+            if (interactive)
+            {
+                paths.Print();
+                string mode = Ask("Select FILE or FOLDER (all direct .d2s/.d2i saves)", "FILE");
+                if (mode.Equals("FILE", StringComparison.OrdinalIgnoreCase)) saves.Add(Folder(PickSave(paths, false, out detected)));
+                else if (mode.Equals("FOLDER", StringComparison.OrdinalIgnoreCase))
+                {
+                    folder = Folder(Ask("SAVE FOLDER (all direct saves will be inspected)", paths.SaveFolderExists ? paths.SaveFolder : ""));
+                    detected = SamePath(folder, paths.SaveFolder);
+                }
+                else throw new ArgumentException("Choose FILE or FOLDER. No saves were edited.");
+                mapping = Ask("Matching old-to-new-ids.csv", "");
+                tables = Ask("This mod's data/global/excel folder (all five required TXT tables)", paths.TablesFolder ?? "");
+                detected = detected || SamePath(tables, paths.TablesFolder);
+                string choice = Ask("Also repair Chronicle history in selected stashes? YES or NO", "NO");
+                if (choice.Equals("YES", StringComparison.OrdinalIgnoreCase)) history = true;
+                else if (!choice.Equals("NO", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Choose YES or NO. No saves were edited.");
+            }
+            else if (tables == null && paths.TablesFolder != null && (detected || explicitMod || SamePath(folder, paths.SaveFolder) ||
+                (saves.Count > 0 && saves.All(p => SamePath(System.IO.Path.GetDirectoryName(Folder(p)), paths.SaveFolder)))))
+            { tables = paths.TablesFolder; detected = true; Console.WriteLine("Using detected mod tables: " + tables); }
+            if ((saves.Count == 0 && folder == null) || (saves.Count > 0 && folder != null) || string.IsNullOrWhiteSpace(mapping) || string.IsNullOrWhiteSpace(tables))
+                throw new ArgumentException("Item repair needs --save-file FILE (repeatable) OR --save-folder FOLDER, plus --mapping CSV and --mod-tables FOLDER.");
+            saves = saves.Select(Folder).ToList(); if (folder != null) folder = Folder(folder);
+            string suggestedBackup = detected ? paths.DefaultBackupRoot() : Engine.DefaultBackupRoot(folder ?? System.IO.Path.GetDirectoryName(saves[0]));
+            if (interactive) backup = Ask("SAVE backup folder (outside all save/game-data folders)", suggestedBackup);
+            else if (backup == null && detected) backup = suggestedBackup;
+            ItemRepairPlan plan = ItemRepair.Build(saves, folder, Folder(mapping), Folder(tables), backup == null ? null : Folder(backup), history);
+            if (detected)
+            {
+                paths.ModInfo.Verify(); plan.DetectedModInfo = paths.ModInfo;
+                Engine.ValidateBackupRoot(System.IO.Path.Combine(paths.ContentFolder, "data"), plan.BackupRoot);
+            }
+            ItemRepair.Preview(plan);
+            if (dry) Console.WriteLine("\nPreview only. No files were written; saves were not edited.");
+            else if (plan.Changes == 0) Console.WriteLine("\nNo mapped IDs need repair. Saves were not edited. Unmapped IDs are not validated.");
+            else
+            {
+                if (!yes)
+                {
+                    if (Console.IsInputRedirected) throw new ArgumentException("Use --dry-run to preview, or --apply --yes to EDIT THE SAVE FILES with mandatory backups.");
+                    if (!Confirm("Back up ALL selected saves and EDIT the listed ID fields.")) { Console.WriteLine("Cancelled. No saves were edited."); return; }
+                }
+                ItemRepair.Apply(plan);
+            }
         }
         public static int Main(string[] args)
         {
-            // The Framework compiler targets CLR 4. Enable the newer path
-            // handling when hosted by current Windows .NET Framework runtimes.
-            Type context = typeof(object).Assembly.GetType("System.AppContext");
-            if (context != null)
-            {
-                MethodInfo setSwitch = context.GetMethod("SetSwitch", new[] { typeof(string), typeof(bool) });
-                if (setSwitch != null)
-                {
-                    setSwitch.Invoke(null, new object[] { "Switch.System.IO.UseLegacyPathHandling", false });
-                    setSwitch.Invoke(null, new object[] { "Switch.System.IO.BlockLongPaths", false });
-                }
-            }
             bool interactive = args.Length == 0 && !Console.IsInputRedirected;
             int exit = 0;
             try
             {
                 Console.OutputEncoding = new UTF8Encoding(false);
-                string target = AppDomain.CurrentDomain.BaseDirectory, vanilla = null, backup = null; int? start = null;
+                string target = AppDomain.CurrentDomain.BaseDirectory, vanilla = null, backup = null, mapping = null, saveFolder = null, modTables = null, modFolder = null, historyFolder = null; int? start = null;
+                var saves = new List<string>();
+                WorkflowMode workflowMode = WorkflowMode.Unspecified;
                 ItemRunesMode itemRunesMode = ItemRunesMode.Unspecified;
-                bool dry = false, apply = false, yes = false;
+                bool dry = false, apply = false, yes = false, repair = false, repairItems = false, history = false, localizationOptions = false, autoSaves = false, detectPaths = false;
                 for (int i = 0; i < args.Length; ++i)
                 {
                     string arg = args[i].ToLowerInvariant();
                     if (arg == "--help" || arg == "-h" || arg == "/?") { Help(); return 0; }
+                    if (arg == "--licenses")
+                    {
+                        Assembly assembly = Assembly.GetExecutingAssembly();
+                        foreach (string name in assembly.GetManifestResourceNames().Where(n => !n.EndsWith(".gz", StringComparison.OrdinalIgnoreCase)).OrderBy(n => n, StringComparer.Ordinal))
+                            using (var reader = new StreamReader(assembly.GetManifestResourceStream(name))) Console.WriteLine("\n" + name + "\n" + reader.ReadToEnd());
+                        return 0;
+                    }
                     if (arg == "--dry-run") dry = true;
+                    else if (arg == "--repair-chronicle") repair = true;
+                    else if (arg == "--repair-items") repairItems = true;
+                    else if (arg == "--include-chronicle") history = true;
+                    else if (arg == "--auto-saves") autoSaves = true;
+                    else if (arg == "--detect-paths") detectPaths = true;
                     else if (arg == "--apply") apply = true;
                     else if (arg == "--yes") yes = true;
-                    else if (arg == "--target" || arg == "--vanilla" || arg == "--start" || arg == "--backup-folder" || arg == "--item-runes-mode")
+                    else if (arg == "--target" || arg == "--vanilla" || arg == "--start" || arg == "--backup-folder" || arg == "--item-runes-mode" || arg == "--save-file" || arg == "--mapping" || arg == "--save-folder" || arg == "--mod-tables" || arg == "--mod-folder" || arg == "--history-folder" || arg == "--mode")
                     {
                         if (++i >= args.Length) throw new ArgumentException("Missing value for " + arg);
+                        if (arg == "--target" || arg == "--vanilla" || arg == "--start" || arg == "--item-runes-mode") localizationOptions = true;
                         if (arg == "--target") target = args[i]; else if (arg == "--vanilla") vanilla = args[i]; else if (arg == "--backup-folder") backup = args[i];
+                        else if (arg == "--save-file") saves.Add(args[i]); else if (arg == "--mapping") mapping = args[i];
+                        else if (arg == "--save-folder") saveFolder = args[i]; else if (arg == "--mod-tables") modTables = args[i];
+                        else if (arg == "--mod-folder") modFolder = args[i];
+                        else if (arg == "--history-folder") historyFolder = args[i];
+                        else if (arg == "--mode") workflowMode = Workflow.ParseMode(args[i]);
                         else if (arg == "--item-runes-mode") itemRunesMode = ParseItemRunesMode(args[i]);
                         else { int parsed; if (!int.TryParse(args[i], NumberStyles.None, CultureInfo.InvariantCulture, out parsed)) throw new ArgumentException("Invalid starting ID."); start = parsed; }
                     }
@@ -664,38 +891,71 @@ namespace D2RLocalizationCompactor
                 }
                 if (dry && (apply || yes)) throw new ArgumentException("--dry-run cannot be combined with --apply or --yes.");
                 if (yes && !apply) throw new ArgumentException("Use --apply together with --yes.");
-                Console.WriteLine("D2R Localization ID Compactor 1.1.0 - MadMike");
+                if (detectPaths)
+                {
+                    if (apply || yes || repair || repairItems || autoSaves || localizationOptions || saves.Count > 0 || saveFolder != null || mapping != null || modTables != null || historyFolder != null || history || workflowMode != WorkflowMode.Unspecified)
+                        throw new ArgumentException("--detect-paths is a standalone read-only action; combine it only with --mod-folder.");
+                    ModPaths detectedPaths = ModPaths.Discover(modFolder == null ? AppDomain.CurrentDomain.BaseDirectory : Folder(modFolder)); detectedPaths.Print();
+                    return detectedPaths.ModInfo != null && detectedPaths.SaveFolderExists ? 0 : 1;
+                }
+                if (workflowMode != WorkflowMode.Unspecified && (repair || repairItems || mapping != null || autoSaves || saves.Count > 0 || itemRunesMode != ItemRunesMode.Unspecified))
+                    throw new ArgumentException("The four workflows resolve their own mapping and scope. Do not combine --mode with advanced repair/mapping/item-runes-mode options.");
+                if (historyFolder != null && workflowMode != WorkflowMode.EditSaveFilesOnly) throw new ArgumentException("--history-folder is only for mode 4 / EDIT SAVE FILES ONLY.");
+                if ((autoSaves || modFolder != null) && !repair && !repairItems && workflowMode == WorkflowMode.Unspecified) throw new ArgumentException("Use --mod-folder with --mode, a repair action, or --detect-paths.");
+                if (autoSaves && (saves.Count > 0 || saveFolder != null)) throw new ArgumentException("Choose --auto-saves OR explicit --save-file/--save-folder paths.");
+                if (repair && repairItems) throw new ArgumentException("Choose --repair-items (optionally --include-chronicle) OR --repair-chronicle.");
+                if ((repair || repairItems) && localizationOptions) throw new ArgumentException("SAVE FILE repair is a separate action. Do not combine it with localization options.");
+                if (!repair && !repairItems && (saves.Count > 0 || mapping != null)) throw new ArgumentException("Use --repair-chronicle or --repair-items to select a SAVE FILE EDIT action.");
+                if (!repairItems && workflowMode != WorkflowMode.CompactAndEditSaves && workflowMode != WorkflowMode.EditSaveFilesOnly && (saveFolder != null || modTables != null || history)) throw new ArgumentException("Save/table options require mode 3, mode 4 or --repair-items.");
+                if (repair && !autoSaves && saves.Count != 1) throw new ArgumentException("Chronicle repair needs exactly one --save-file, or --auto-saves.");
+                Console.WriteLine("D2R Localization ID Compactor 1.6.1 - MadMike");
                 if (interactive)
                 {
-                    target = Ask("Target strings folder", target);
-                    string referencePath = Ask("Vanilla strings folder, or BUILTIN for D2R 3.4", "BUILTIN");
-                    if (!referencePath.Equals("BUILTIN", StringComparison.OrdinalIgnoreCase)) vanilla = referencePath;
+                    workflowMode = Workflow.Choose();
                 }
-                target = Folder(target); if (vanilla != null) vanilla = Folder(vanilla);
-                if (interactive) backup = Ask("Backup folder (must be outside game data)", Engine.DefaultBackupRoot(target));
-                if (backup != null) backup = Folder(backup);
-                if (vanilla != null && string.Equals(target.TrimEnd('\\', '/'), vanilla.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Target and vanilla reference must be different folders.");
-                Reference reference = Reference.Load(vanilla);
-                long suggested = Math.Max(30000L, (((long)reference.Maximum + 1 + 999) / 1000) * 1000);
-                if (interactive)
+                ModPaths paths = repairItems || repair || workflowMode != WorkflowMode.Unspecified ? ModPaths.Discover(modFolder == null ? AppDomain.CurrentDomain.BaseDirectory : Folder(modFolder)) : null;
+                if (interactive && paths != null && paths.ModInfo == null && (repair || repairItems || workflowMode == WorkflowMode.CompactAndEditSaves || workflowMode == WorkflowMode.EditSaveFilesOnly))
                 {
-                    string answer = Ask("Starting custom ID", suggested.ToString(CultureInfo.InvariantCulture)); int parsed;
-                    if (!int.TryParse(answer, NumberStyles.None, CultureInfo.InvariantCulture, out parsed)) throw new ArgumentException("Invalid starting ID."); start = parsed;
+                    Console.WriteLine("The EXE is not inside a recognized mod. Select its folder once to detect the save/table paths, or choose MANUAL.");
+                    string selectedMod = Ask("Mod folder or MANUAL", "MANUAL");
+                    if (!selectedMod.Equals("MANUAL", StringComparison.OrdinalIgnoreCase)) paths = ModPaths.Discover(Folder(selectedMod));
                 }
-                if (!start.HasValue) { if (suggested > Engine.MaximumId) throw new InvalidDataException("The reference leaves no supported custom ID range; review its outliers."); start = (int)suggested; }
-                if (interactive && Engine.JsonFiles(target).Any(p => string.Equals(System.IO.Path.GetFileName(p), "item-runes.json", StringComparison.OrdinalIgnoreCase))) itemRunesMode = AskItemRunesMode();
-                Plan plan = Engine.Build(target, reference, start.Value, backup, itemRunesMode); Engine.Preview(plan);
-                if (dry) Console.WriteLine("\nPreview only. No files were written.");
-                else if (plan.Changed == 0 && plan.LegacyBackup == null) Console.WriteLine("\nNo ID changes are needed.");
+                if (workflowMode != WorkflowMode.Unspecified) RunWorkflow(workflowMode, target, args.Any(a => a.Equals("--target", StringComparison.OrdinalIgnoreCase)), vanilla, start, backup, saveFolder, modTables, historyFolder, paths, interactive, dry, yes);
+                else if (repairItems) RepairItems(saves, saveFolder, mapping, modTables, backup, history, interactive, dry, yes, paths, autoSaves, modFolder != null);
+                else if (repair) Repair(saves.FirstOrDefault(), mapping, backup, interactive, dry, yes, paths, autoSaves);
                 else
                 {
-                    if (!yes)
+                    if (interactive)
                     {
-                        if (Console.IsInputRedirected) throw new ArgumentException("Use --dry-run to preview, or --apply --yes to write with backups.");
-                        Console.Write("\nType APPLY (any letter case) to relocate old backups if needed, back up scanned JSON and apply this plan: ");
-                        if (!string.Equals((Console.ReadLine() ?? "").Trim(), "APPLY", StringComparison.OrdinalIgnoreCase)) { Console.WriteLine("Cancelled. No files were written."); return 0; }
+                        target = Ask("Target strings folder", target);
+                        string referencePath = Ask("Vanilla strings folder, or BUILTIN for D2R 3.4", "BUILTIN");
+                        if (!referencePath.Equals("BUILTIN", StringComparison.OrdinalIgnoreCase)) vanilla = referencePath;
                     }
-                    Engine.Apply(plan);
+                    target = Folder(target); if (vanilla != null) vanilla = Folder(vanilla);
+                    if (interactive) backup = Ask("Backup folder (must be outside game data)", Engine.DefaultBackupRoot(target));
+                    if (backup != null) backup = Folder(backup);
+                    if (vanilla != null && string.Equals(target.TrimEnd('\\', '/'), vanilla.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Target and vanilla reference must be different folders.");
+                    Reference reference = Reference.Load(vanilla);
+                    long suggested = Math.Max(30000L, (((long)reference.Maximum + 1 + 999) / 1000) * 1000);
+                    if (interactive)
+                    {
+                        string answer = Ask("Starting custom ID", suggested.ToString(CultureInfo.InvariantCulture)); int parsed;
+                        if (!int.TryParse(answer, NumberStyles.None, CultureInfo.InvariantCulture, out parsed)) throw new ArgumentException("Invalid starting ID."); start = parsed;
+                    }
+                    if (!start.HasValue) { if (suggested > Engine.MaximumId) throw new InvalidDataException("The reference leaves no supported custom ID range; review its outliers."); start = (int)suggested; }
+                    if (interactive && Engine.JsonFiles(target).Any(p => string.Equals(System.IO.Path.GetFileName(p), "item-runes.json", StringComparison.OrdinalIgnoreCase))) itemRunesMode = AskItemRunesMode();
+                    Plan plan = Engine.Build(target, reference, start.Value, backup, itemRunesMode); Engine.Preview(plan);
+                    if (dry) Console.WriteLine("\nPreview only. No files were written.");
+                    else if (plan.Changed == 0 && plan.LegacyBackup == null) Console.WriteLine("\nNo ID changes are needed.");
+                    else
+                    {
+                        if (!yes)
+                        {
+                            if (Console.IsInputRedirected) throw new ArgumentException("Use --dry-run to preview, or --apply --yes to write with backups.");
+                            if (!Confirm("Relocate old backups if needed, back up scanned JSON and apply this plan.")) { Console.WriteLine("Cancelled. No files were written."); return 0; }
+                        }
+                        Engine.Apply(plan);
+                    }
                 }
             }
             catch (Exception error) { Console.Error.WriteLine("\nERROR: " + error.Message); exit = 1; }

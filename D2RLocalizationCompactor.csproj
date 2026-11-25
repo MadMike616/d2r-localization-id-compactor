@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeFrameworkVersion>10.0.12</RuntimeFrameworkVersion>
+    <AssemblyName>D2R-Localization-ID-Compactor</AssemblyName>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <Nullable>disable</Nullable>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Optimize>true</Optimize>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <UseArtifactsOutput>true</UseArtifactsOutput>
+    <ArtifactsPath>$(MSBuildThisFileDirectory)..\build-localization-id-compactor-1.6.1\artifacts</ArtifactsPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Compactor.cs;ChronicleRepair.cs;ItemRepair.cs;ModPaths.cs;Workflow.cs;SaveOnly.cs" />
+    <EmbeddedResource Include="vanilla-3.4.json.gz" LogicalName="vanilla-3.4.json.gz" />
+    <EmbeddedResource Include="LICENSE;THIRD-PARTY-NOTICES.txt;ThirdParty\DotNet\LICENSE.txt;ThirdParty\DotNet\THIRD-PARTY-NOTICES.txt" />
+    <ProjectReference Include="ThirdParty\D2SSharp\D2SSharp.csproj" />
+  </ItemGroup>
+</Project>

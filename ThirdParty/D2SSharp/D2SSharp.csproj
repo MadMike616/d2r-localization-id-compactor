@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>preview</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Authors>ResurrectedTrader</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/ResurrectedTrader/D2SSharp</RepositoryUrl>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <UseArtifactsOutput>true</UseArtifactsOutput>
+    <ArtifactsPath>$(MSBuildThisFileDirectory)..\..\..\build-localization-id-compactor-1.6.1\artifacts</ArtifactsPath>
+  </PropertyGroup>
+  <!-- Game data is deliberately not bundled. Item repair always uses the
+       explicitly selected mod's tables via TxtFileExternalData(folder, 105). -->
+</Project>

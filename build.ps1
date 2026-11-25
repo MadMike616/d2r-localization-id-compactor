@@ -1,28 +1,25 @@
 param(
-    [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\build-localization-id-compactor-1.1.0\release')
+    [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\build-localization-id-compactor-1.6.1\release')
 )
 $ErrorActionPreference = 'Stop'
-$compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-if (-not (Test-Path -LiteralPath $compiler)) {
-    $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
-}
-if (-not (Test-Path -LiteralPath $compiler)) { throw '.NET Framework 4.x C# compiler was not found.' }
-$profile = Join-Path $PSScriptRoot 'vanilla-3.4.json.gz'
-if (-not (Test-Path -LiteralPath $profile)) { throw 'The bundled vanilla ID/key reference is missing.' }
 $output = [IO.Path]::GetFullPath($OutputDirectory)
+$buildRoot = Split-Path -Parent $output
+$env:DOTNET_CLI_HOME = Join-Path $buildRoot '.dotnet-home'
+if ([string]::IsNullOrWhiteSpace($env:NUGET_PACKAGES)) { $env:NUGET_PACKAGES = Join-Path $buildRoot '.nuget' }
+$env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
+$env:DOTNET_GENERATE_ASPNET_CERTIFICATE = 'false'
 $null = New-Item -ItemType Directory -Path $output -Force
+& dotnet publish (Join-Path $PSScriptRoot 'D2RLocalizationCompactor.csproj') -c Release -r win-x64 --self-contained true `
+    --artifacts-path (Join-Path $buildRoot 'artifacts') -o $output `
+    -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true `
+    -p:UseSharedCompilation=false -nodeReuse:false
+if ($LASTEXITCODE -ne 0) { throw 'Release publish failed. .NET 10 SDK and the Windows x64 runtime packs are required to build.' }
 $executable = Join-Path $output 'D2R-Localization-ID-Compactor.exe'
-$framework = Split-Path -Parent $compiler
-$arguments = @('/nologo', '/target:exe', '/platform:anycpu', '/optimize+', '/debug-', '/warn:4', '/warnaserror+',
-    ('/win32manifest:' + (Join-Path $PSScriptRoot 'app.manifest')),
-    ('/out:' + $executable), ('/resource:' + $profile + ',vanilla-3.4.json.gz'),
-    ('/reference:' + (Join-Path $framework 'System.Core.dll')),
-    ('/reference:' + (Join-Path $framework 'System.Web.Extensions.dll')),
-    (Join-Path $PSScriptRoot 'Compactor.cs'))
-& $compiler @arguments
-if ($LASTEXITCODE -ne 0) { throw 'Release compilation failed.' }
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.txt') -Destination (Join-Path $output 'README.txt') -Force
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE') -Destination (Join-Path $output 'LICENSE') -Force
+foreach ($name in @('README.txt', 'LICENSE', 'THIRD-PARTY-NOTICES.txt', 'CHANGELOG.txt')) {
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $output $name) -Force
+}
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'ThirdParty\DotNet\LICENSE.txt') -Destination (Join-Path $output 'DOTNET-LICENSE.txt') -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'ThirdParty\DotNet\THIRD-PARTY-NOTICES.txt') -Destination (Join-Path $output 'DOTNET-THIRD-PARTY-NOTICES.txt') -Force
 $hash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText((Join-Path $output 'SHA256SUMS.txt'), ($hash + '  D2R-Localization-ID-Compactor.exe' + [Environment]::NewLine), [Text.Encoding]::ASCII)
 Write-Output ('Release executable: ' + $executable)
