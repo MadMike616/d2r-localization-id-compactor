@@ -9,8 +9,9 @@ A portable Windows utility by **MadMike** for compacting custom Diablo II: Resur
 1. Download the EXE or extract the release ZIP.
 2. Close the game and copy `D2R-Localization-ID-Compactor.exe` into the mod's loose `data/local/lng/strings` folder. You can also run it elsewhere and enter the target folder when prompted.
 3. Double-click the EXE. Accept the built-in vanilla **D2R 3.4** reference, or select an unmodified vanilla strings extraction. Ladik's Casc Viewer can extract a fresh reference.
-4. Choose the first custom ID; the default is **30000** with the bundled reference.
-5. Review the preview, then type `apply` in any letter case. The program backs up every scanned JSON before replacing any active file.
+4. Choose a backup folder outside game data; the suggested location is outside the containing `.mpq` or `data` folder.
+5. Choose the first custom ID; the default is **30000** with the bundled reference.
+6. Review the preview, then type `apply` in any letter case. The program backs up every scanned JSON before replacing any active file.
 
 Requires Windows with .NET Framework 4.x. The executable contains its vanilla ID/key reference; Python, additional DLLs and D2RLoader are not required to run it. This is a standalone file utility.
 
@@ -44,10 +45,10 @@ If a single record occupies a vanilla slot in its original filename, its ID is p
 
 ## Backups and preservation
 
-Before any active replacement, the program writes and verifies backups of **all scanned JSON files**, including skipped files:
+Before any active replacement, the program writes and verifies backups of **all scanned JSON files**, including skipped files. The backup root is **outside game data**, normally beside the containing `.mpq` or `data` folder. For an arbitrary standalone target folder, it is beside that folder. The complete location is shown in the preview:
 
 ```text
-Localization-ID-Backups/<timestamp-and-unique-suffix>/
+<mod-folder>/Localization-ID-Backups/<timestamp-and-unique-suffix>/
   originals/              Original files
   old-to-new-ids.csv      Complete custom ID mapping
   preserved-vanilla.csv   Preserved records and classification reasons
@@ -56,7 +57,9 @@ Localization-ID-Backups/<timestamp-and-unique-suffix>/
 
 Only the planned numeric ID digits are replaced. Keys, translations, comments, whitespace, escape spelling, line endings, BOMs and entry order are retained. UTF-8 and UTF-16 with a BOM are supported; malformed encodings are rejected. JSON comments and trailing commas are accepted.
 
-Outputs are staged and replaced atomically on supported Windows filesystems such as NTFS. A failed write triggers a rollback attempt, with any incomplete recovery reported alongside the backup location. Changes detected after the preview invalidate the plan. Repeating an already compacted plan does not create another backup.
+Outputs are staged and replaced atomically on supported Windows filesystems such as NTFS. A failed write triggers a rollback attempt, with any incomplete recovery reported alongside the backup location. Changes detected after the preview invalidate the plan. Repeating an already compacted plan does not create another originals backup.
+
+**Upgrading from 1.0.0 or 1.0.1:** those versions placed backups under the selected strings folder. D2RLoader scans those subfolders and rejects the backup manifest as an invalid localization table. Version **1.0.2** relocates verified old compactor backups when you apply its preview, even if no ID changes are needed. They remain intact in a `Migrated-legacy-*` folder outside game data. Automatic relocation requires the same drive; unknown/incomplete folders require manual review. New backup destinations inside game data or the vanilla reference tree are rejected.
 
 To restore, close the game and copy all files from the selected `originals` folder back into the target folder.
 
@@ -82,6 +85,12 @@ Use a fresh vanilla extraction:
 
 ```powershell
 .\D2R-Localization-ID-Compactor.exe --target "<mod-strings>" --vanilla "<vanilla-strings>" --dry-run
+```
+
+Choose another safe backup root:
+
+```powershell
+.\D2R-Localization-ID-Compactor.exe --target "<mod-strings>" --backup-folder "<external-backups>" --apply --yes
 ```
 
 Use `--help` for all options. Exit code `0` means completion, preview, cancellation or no changes needed; `1` means validation/write failure.

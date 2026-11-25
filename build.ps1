@@ -1,5 +1,5 @@
 param(
-    [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\build-localization-id-compactor-1.0.1\release')
+    [string]$OutputDirectory = (Join-Path $PSScriptRoot '..\build-localization-id-compactor-1.0.2\release')
 )
 $ErrorActionPreference = 'Stop'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'

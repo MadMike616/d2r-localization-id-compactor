@@ -1,4 +1,4 @@
-D2R Localization ID Compactor 1.0.1
+D2R Localization ID Compactor 1.0.2
 Author: MadMike
 License: MIT
 
@@ -14,9 +14,10 @@ Close the game before applying a plan.
 2. Accept BUILTIN for the included vanilla D2R 3.4 ID/key reference, or paste
    the path to an original vanilla strings folder extracted with Ladik's Casc
    Viewer. Use a separate, unmodified extraction for the reference.
-3. Choose the first custom ID. The default is 30000 with the built-in reference.
-4. Review the file ranges, skipped files and preserved vanilla duplicates.
-5. Type apply in any letter case to proceed. Leading/trailing spaces are accepted.
+3. Accept the suggested backup folder outside game data, or choose another safe folder.
+4. Choose the first custom ID. The default is 30000 with the built-in reference.
+5. Review the file ranges, skipped files and preserved vanilla duplicates.
+6. Type apply in any letter case to proceed. Leading/trailing spaces are accepted.
    Entering anything else cancels without writing files.
 
 WHAT GETS PROCESSED
@@ -85,8 +86,26 @@ invalid character encodings are rejected. JSON links/reparse points are rejected
 BACKUPS AND RECOVERY
 
 Before replacing any active file, every scanned JSON file (including skipped
-files) is backed up and its SHA-256 verified under:
+files) is backed up and its SHA-256 verified. Backups and JSON reports are kept
+OUTSIDE the game-data tree. For a normal mod layout, the suggested location is:
+  <mod-folder>/Localization-ID-Backups/<timestamp-and-unique-suffix>/originals/
+
+For a target inside a .mpq directory, the backup root is placed beside that
+.mpq directory. For a data/ layout without a .mpq wrapper, it is placed beside
+data/. For another standalone folder, it is placed beside the selected folder:
   Localization-ID-Backups/<timestamp-and-unique-suffix>/originals/
+
+The preview prints the complete destination. An explicit --backup-folder can
+override it, but destinations within localization/game data or the vanilla
+reference tree are rejected. D2RLoader reads JSON recursively under strings;
+placing a backup manifest there prevents string-table initialization.
+
+Versions 1.0.0 and 1.0.1 placed backups inside the target strings folder. Run
+1.0.2 or later and apply the preview to relocate verified old compactor backups
+outside game data. This relocation is offered even if IDs are already compacted.
+Old backup files are preserved together in a Migrated-legacy-* folder. Automatic
+relocation requires source and destination to be on the same drive. Unknown or
+incomplete old backup folders require manual review/moving.
 
 The same backup folder contains:
   old-to-new-ids.csv       File, record index, Key, old ID and new ID
@@ -101,7 +120,7 @@ The volume must support Windows File.Replace (for example, NTFS).
 Concurrent edits and added/removed JSON files invalidate the preview and abort.
 The tool never intentionally overwrites a concurrent edit during rollback.
 A completed run verifies the written hashes. A run needing no ID changes does
-not create another backup. Backup folders are never recursively scanned.
+not create another originals backup; legacy backups can still be relocated.
 
 To restore, close the game and copy the entire contents of the chosen
 originals folder back into the target strings folder, replacing those files.
@@ -125,6 +144,9 @@ Apply with mandatory backups and no interactive prompt:
 
 Use another vanilla extraction:
   "D2R-Localization-ID-Compactor.exe" --target "<mod-strings>" --vanilla "<vanilla-strings>" --dry-run
+
+Select a backup root outside game data:
+  "D2R-Localization-ID-Compactor.exe" --target "<mod-strings>" --backup-folder "<external-backups>" --apply --yes
 
 Exit code 0 means successful completion, preview, cancellation or no changes
 needed. Exit code 1 means validation/write failure. CLI runs do not pause.

@@ -24,6 +24,7 @@ class CompactorTests(unittest.TestCase):
         self.root = ARGS.work / (self._testMethodName + '-' + uuid.uuid4().hex[:8])
         self.target = self.root / 'strings & Unicode 測試'
         self.reference = self.root / 'vanilla'
+        self.backup_root = self.root / 'Localization-ID-Backups'
         self.target.mkdir(parents=True)
         self.reference.mkdir()
         self.write('item-gems.json', [row(10, 'StockGem')], self.reference)
@@ -51,7 +52,7 @@ class CompactorTests(unittest.TestCase):
         return {p.name: p.read_bytes() for p in self.target.iterdir() if p.is_file()}
 
     def manifests(self):
-        return list((self.target / 'Localization-ID-Backups').glob('*/manifest.json'))
+        return list(self.backup_root.glob('*/manifest.json'))
 
     def ids(self, name):
         return [r['id'] for r in json.loads((self.target / name).read_text(encoding='utf-8-sig'))]
@@ -91,7 +92,7 @@ class CompactorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('30000-30000', result.stdout)
         self.assertEqual(self.snapshot(), before)
-        self.assertFalse((self.target / 'Localization-ID-Backups').exists())
+        self.assertFalse(self.backup_root.exists())
 
     def test_mixed_case_options_apply_and_preserve_values(self):
         self.write('MixedCase.json', [row(5, 'KeepMyCase', 'Keep This Text')])
@@ -267,6 +268,88 @@ class CompactorTests(unittest.TestCase):
         self.assertIn('No ID changes are needed', result.stdout)
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.manifests(), manifests)
+
+    def test_backup_json_is_outside_recursive_game_string_scan(self):
+        self.target = self.root / 'Arbitrary Mod' / 'UnrelatedName.MPQ' / 'data' / 'local' / 'lng' / 'strings'
+        self.target.mkdir(parents=True)
+        self.write('extra.json', [row(5, 'Custom')])
+        self.apply()
+        backup = self.root / 'Arbitrary Mod' / 'Localization-ID-Backups'
+        manifest, = backup.glob('*/manifest.json')
+        self.assertEqual(json.loads(manifest.read_text(encoding='utf-8'))['status'], 'Complete')
+        # D2RLoader scans recursively: every JSON remaining under strings must
+        # be an actual string-table array, with no manifest or original copies.
+        loaded = list(self.target.rglob('*.json'))
+        self.assertEqual([p.name for p in loaded], ['extra.json'])
+        self.assertTrue(all(isinstance(json.loads(p.read_text(encoding='utf-8')), list) for p in loaded))
+
+    def test_data_layout_without_mpq_uses_mod_root_for_backups(self):
+        self.target = self.root / 'Different Mod' / 'data' / 'local' / 'lng' / 'strings'
+        self.target.mkdir(parents=True)
+        self.write('extra.json', [row(5, 'Custom')])
+        self.apply()
+        self.assertEqual(len(list((self.root / 'Different Mod' / 'Localization-ID-Backups').glob('*/manifest.json'))), 1)
+        self.assertEqual(len(list((self.root / 'Different Mod' / 'data').rglob('*.json'))), 1)
+
+    def test_backup_override_inside_game_data_is_rejected(self):
+        self.target = self.root / 'Mod' / 'Mod.mpq' / 'data' / 'local' / 'lng' / 'strings'
+        self.target.mkdir(parents=True)
+        self.write('extra.json', [row(5, 'Custom')])
+        before = self.snapshot()
+        unsafe = self.root / 'Mod' / 'Mod.mpq' / 'data' / 'OtherBackups'
+        result = self.run_tool('--backup-folder', str(unsafe), '--apply', '--yes')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('outside the localization/game-data tree', result.stderr)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(unsafe.exists())
+
+    def test_explicit_external_backup_folder(self):
+        self.write('extra.json', [row(5, 'Custom')])
+        external = self.root / 'Explicit Backups'
+        self.apply('--BaCkUp-FoLdEr', str(external))
+        self.assertEqual(len(list(external.glob('*/manifest.json'))), 1)
+        self.assertFalse(self.backup_root.exists())
+
+    def test_legacy_backups_are_relocated_even_for_already_compacted_ids(self):
+        active = self.write('extra.json', [row(30000, 'Custom')])
+        before = active.read_bytes()
+        legacy = self.target / 'Localization-ID-Backups'
+        old_run = legacy / 'old-run'
+        (old_run / 'originals').mkdir(parents=True)
+        original = json.dumps([row(5, 'Custom')]).encode('utf-8')
+        (old_run / 'originals' / 'extra.json').write_bytes(original)
+        (old_run / 'manifest.json').write_text(json.dumps({'tool': 'D2R Localization ID Compactor', 'version': '1.0.1'}), encoding='utf-8')
+        result = self.run_tool('--dry-run')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Old backups inside game data will be relocated', result.stdout)
+        self.assertTrue(legacy.exists())
+        self.assertFalse(self.backup_root.exists())
+        result = self.apply()
+        self.assertIn('Moved old backups out of game data', result.stdout)
+        self.assertFalse(legacy.exists())
+        moved, = self.backup_root.glob('Migrated-legacy-*')
+        self.assertEqual((moved / 'old-run' / 'originals' / 'extra.json').read_bytes(), original)
+        self.assertEqual(active.read_bytes(), before)
+        self.assertEqual([p.name for p in self.target.rglob('*.json')], ['extra.json'])
+
+    def test_unrecognized_legacy_folder_requires_manual_review(self):
+        self.write('extra.json', [row(5, 'Custom')])
+        old_run = self.target / 'Localization-ID-Backups' / 'old-run'
+        old_run.mkdir(parents=True)
+        (old_run / 'manifest.json').write_text(json.dumps({'tool': 'Another application'}), encoding='utf-8')
+        before = self.snapshot()
+        result = self.run_tool('--apply', '--yes')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('not owned by this utility', result.stderr)
+        self.assertTrue(old_run.exists())
+        self.assertEqual(self.snapshot(), before)
+
+    def test_backup_override_cannot_pollute_vanilla_reference(self):
+        self.write('extra.json', [row(5, 'Custom')])
+        result = self.run_tool('--backup-folder', str(self.reference / 'Backups'), '--apply', '--yes')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('outside the vanilla reference tree', result.stderr)
+        self.assertFalse((self.reference / 'Backups').exists())
 
     @unittest.skipUnless(os.name == 'nt', 'Windows File.Replace/read-only behavior')
     def test_failed_second_commit_rolls_back_first(self):

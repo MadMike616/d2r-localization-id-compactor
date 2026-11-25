@@ -14,9 +14,9 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyCompany("MadMike")]
 [assembly: AssemblyProduct("D2R Localization ID Compactor")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 MadMike")]
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
-[assembly: AssemblyInformationalVersion("1.0.1")]
+[assembly: AssemblyVersion("1.0.2.0")]
+[assembly: AssemblyFileVersion("1.0.2.0")]
+[assembly: AssemblyInformationalVersion("1.0.2")]
 
 namespace D2RLocalizationCompactor
 {
@@ -194,6 +194,7 @@ namespace D2RLocalizationCompactor
     internal sealed class Reference
     {
         public string Description;
+        public string SourceFolder;
         public readonly Dictionary<string, Dictionary<int, HashSet<string>>> Files = new Dictionary<string, Dictionary<int, HashSet<string>>>(StringComparer.OrdinalIgnoreCase);
         public readonly Dictionary<int, HashSet<string>> Global = new Dictionary<int, HashSet<string>>();
         public int Maximum;
@@ -217,6 +218,7 @@ namespace D2RLocalizationCompactor
             }
             else
             {
+                result.SourceFolder = folder;
                 result.Description = "Vanilla extraction: " + folder;
                 foreach (string path in Engine.JsonFiles(folder))
                 {
@@ -248,6 +250,7 @@ namespace D2RLocalizationCompactor
     internal sealed class Plan
     {
         public string Target;
+        public string BackupRoot, LegacyBackup;
         public Reference Reference;
         public int Start, Changed;
         public List<Document> Documents;
@@ -266,13 +269,67 @@ namespace D2RLocalizationCompactor
             return Directory.GetFiles(folder).Where(p => p.EndsWith(".json", StringComparison.OrdinalIgnoreCase)).OrderBy(p => Rank(System.IO.Path.GetFileName(p))).ThenBy(p => System.IO.Path.GetFileName(p), StringComparer.OrdinalIgnoreCase).ToArray();
         }
         private static int Rank(string name) { for (int i = 0; i < FirstFiles.Length; ++i) if (string.Equals(name, FirstFiles[i], StringComparison.OrdinalIgnoreCase)) return i; return FirstFiles.Length; }
+        private static bool Within(string path, string root)
+        {
+            string normalized = System.IO.Path.GetFullPath(path).TrimEnd('\\', '/');
+            string boundary = System.IO.Path.GetFullPath(root).TrimEnd('\\', '/');
+            return string.Equals(normalized, boundary, StringComparison.OrdinalIgnoreCase) || normalized.StartsWith(boundary + System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+        private static DirectoryInfo DataBoundary(string target)
+        {
+            var ancestors = new List<DirectoryInfo>();
+            for (DirectoryInfo current = new DirectoryInfo(target); current != null; current = current.Parent) ancestors.Add(current);
+            return ancestors.LastOrDefault(d => d.Name.EndsWith(".mpq", StringComparison.OrdinalIgnoreCase))
+                ?? ancestors.LastOrDefault(d => d.Name.Equals("data", StringComparison.OrdinalIgnoreCase))
+                ?? ancestors.LastOrDefault(d => d.Name.Equals("strings", StringComparison.OrdinalIgnoreCase) || d.Name.Equals("strings-legacy", StringComparison.OrdinalIgnoreCase))
+                ?? ancestors[0];
+        }
+        public static string DefaultBackupRoot(string target)
+        {
+            DirectoryInfo boundary = DataBoundary(target);
+            if (boundary.Parent == null) throw new InvalidDataException("Choose a backup folder outside the target using --backup-folder.");
+            return System.IO.Path.Combine(boundary.Parent.FullName, "Localization-ID-Backups");
+        }
+        private static void ValidateBackupRoot(string target, string backup)
+        {
+            if (Within(backup, DataBoundary(target).FullName)) throw new InvalidDataException("The backup folder must be outside the localization/game-data tree. Choose a folder outside strings, data and any containing .mpq folder.");
+            for (DirectoryInfo current = new DirectoryInfo(backup); current != null; current = current.Parent)
+                if (current.Exists && (current.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("Backup paths must not use links/reparse points: " + current.FullName);
+        }
+        private static string FindLegacyBackup(string target)
+        {
+            string root = System.IO.Path.Combine(target, "Localization-ID-Backups");
+            if (!Directory.Exists(root)) return null;
+            var directories = new Stack<string>(); directories.Push(root);
+            while (directories.Count > 0)
+            {
+                string directory = directories.Pop();
+                if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) throw new IOException("Legacy backup links cannot be migrated automatically: " + directory);
+                foreach (string file in Directory.GetFiles(directory))
+                    if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0) throw new IOException("Legacy backup links cannot be migrated automatically: " + file);
+                foreach (string child in Directory.GetDirectories(directory)) directories.Push(child);
+            }
+            if (Directory.GetFiles(root).Length != 0) throw new InvalidDataException("Unrecognized files in the old backup folder; move it outside game data manually: " + root);
+            foreach (string run in Directory.GetDirectories(root))
+            {
+                string manifest = System.IO.Path.Combine(run, "manifest.json");
+                if (!File.Exists(manifest)) throw new InvalidDataException("Incomplete old backup folder; move it outside game data manually: " + root);
+                JsonValue tool = new JsonReader(File.ReadAllText(manifest, Encoding.UTF8), manifest).Read().Field("tool");
+                if (tool == null || tool.Kind != "string" || tool.Text != "D2R Localization ID Compactor") throw new InvalidDataException("The old backup folder is not owned by this utility; move it outside game data manually: " + root);
+            }
+            return root;
+        }
         public static string Hash(byte[] value) { using (SHA256 sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(value)).Replace("-", "").ToLowerInvariant(); }
-        public static Plan Build(string target, Reference reference, int start)
+        public static Plan Build(string target, Reference reference, int start, string backupFolder)
         {
             if (start <= reference.Maximum || start < 0 || start > MaximumId) throw new InvalidDataException("Starting ID must be above the vanilla maximum " + reference.Maximum + " and at most " + MaximumId + ".");
             string[] files = JsonFiles(target);
             if (files.Length == 0) throw new InvalidDataException("No .json files were found in the target folder.");
-            var plan = new Plan { Target = target, Reference = reference, Start = start, Documents = files.Select(Document.Read).ToList() };
+            string backupRoot = System.IO.Path.GetFullPath(backupFolder ?? DefaultBackupRoot(target));
+            ValidateBackupRoot(target, backupRoot);
+            if (reference.SourceFolder != null && Within(backupRoot, DataBoundary(reference.SourceFolder).FullName)) throw new InvalidDataException("The backup folder must be outside the vanilla reference tree.");
+            var plan = new Plan { Target = target, Reference = reference, Start = start, BackupRoot = backupRoot,
+                LegacyBackup = FindLegacyBackup(target), Documents = files.Select(Document.Read).ToList() };
             var finalIds = new Dictionary<int, List<string>>();
             long cursor = start;
             foreach (Document doc in plan.Documents)
@@ -351,6 +408,8 @@ namespace D2RLocalizationCompactor
         {
             Console.WriteLine("\nTarget: " + plan.Target);
             Console.WriteLine("Reference: " + plan.Reference.Description);
+            Console.WriteLine("Backup folder (outside game data): " + plan.BackupRoot);
+            if (plan.LegacyBackup != null) Console.WriteLine("Old backups inside game data will be relocated: " + plan.LegacyBackup);
             Console.WriteLine("Vanilla maximum: " + plan.Reference.Maximum + " (251780 excluded from the maximum; its ID remains reserved)");
             Console.WriteLine("\nFile                            Custom range          IDs changing");
             foreach (Document doc in plan.Documents)
@@ -379,9 +438,9 @@ namespace D2RLocalizationCompactor
         }
         private static object Manifest(Plan plan, string status, string message)
         {
-            return new { tool = "D2R Localization ID Compactor", version = "1.0.1", utc = DateTime.UtcNow.ToString("o"),
+            return new { tool = "D2R Localization ID Compactor", version = "1.0.2", utc = DateTime.UtcNow.ToString("o"),
                 status = status, message = message, target = plan.Target, reference = plan.Reference.Description,
-                startingId = plan.Start, minimumBoundaryDistance = 300, changedIds = plan.Changed,
+                startingId = plan.Start, minimumBoundaryDistance = 300, changedIds = plan.Changed, backupRoot = plan.BackupRoot,
                 files = plan.Documents.Select(d => new { name = d.Name, originalSha256 = Hash(d.Original), outputSha256 = Hash(d.Output),
                     records = d.Records == null ? 0 : d.Records.Count, changingIds = d.Changed, firstCustomId = d.First, lastCustomId = d.Last, skipped = d.SkipReason }).ToArray(),
                 preservedVanillaDuplicateGroups = plan.VanillaDuplicates.ToDictionary(p => p.Key.ToString(CultureInfo.InvariantCulture), p => p.Value) };
@@ -394,8 +453,19 @@ namespace D2RLocalizationCompactor
         public static void Apply(Plan plan)
         {
             SnapshotStillMatches(plan);
-            if (plan.Changed == 0) { Console.WriteLine("No ID changes are needed. No backup was necessary."); return; }
-            string parent = System.IO.Path.Combine(plan.Target, "Localization-ID-Backups");
+            ValidateBackupRoot(plan.Target, plan.BackupRoot);
+            string parent = plan.BackupRoot;
+            if (plan.LegacyBackup != null)
+            {
+                if (FindLegacyBackup(plan.Target) != plan.LegacyBackup) throw new IOException("The legacy backup location changed after preview.");
+                Directory.CreateDirectory(parent);
+                string migrated = System.IO.Path.Combine(parent, "Migrated-legacy-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+                try { Directory.Move(plan.LegacyBackup, migrated); }
+                catch (IOException error) { throw new IOException("Could not relocate old backups. Choose a backup folder on the same drive, or move " + plan.LegacyBackup + " outside game data manually. No active localization files have been changed.", error); }
+                Console.WriteLine("Moved old backups out of game data to: " + migrated);
+                File.WriteAllText(System.IO.Path.Combine(migrated, "migration.txt"), "Original location: " + plan.LegacyBackup + Environment.NewLine + "Safe location: " + migrated + Environment.NewLine, new UTF8Encoding(false));
+            }
+            if (plan.Changed == 0) { Console.WriteLine("No ID changes are needed. No new originals backup was necessary."); return; }
             if (Directory.Exists(parent) && (File.GetAttributes(parent) & FileAttributes.ReparsePoint) != 0) throw new IOException("The backup folder must not be a link/reparse point.");
             Directory.CreateDirectory(parent);
             plan.Backup = System.IO.Path.Combine(parent, DateTime.Now.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N").Substring(0, 8));
@@ -469,10 +539,10 @@ namespace D2RLocalizationCompactor
         private static string Ask(string label, string value) { Console.Write(label + " [" + value + "]: "); string answer = Console.ReadLine(); return string.IsNullOrWhiteSpace(answer) ? value : answer.Trim(); }
         private static void Help()
         {
-            Console.WriteLine("D2R Localization ID Compactor 1.0.1 - MadMike\n");
+            Console.WriteLine("D2R Localization ID Compactor 1.0.2 - MadMike\n");
             Console.WriteLine("Double-click to choose a folder, preview the ranges, then type APPLY to proceed.");
             Console.WriteLine("The default target is the folder containing this executable.");
-            Console.WriteLine("\nOptions:\n  --target FOLDER    Target folder (direct .json children only)\n  --vanilla FOLDER   Use a fresh vanilla strings extraction instead of built-in 3.4\n  --start NUMBER     First custom ID (default 30000, or above a newer reference)\n  --dry-run          Preview only; write nothing\n  --apply --yes      Apply without an interactive prompt; backups remain mandatory\n  --help            Show this help\n\nThe seven established filenames come first; additional filenames follow alphabetically.\nCustom IDs stop at 65534 for native 16-bit field compatibility.\nMalformed JSON, ambiguous vanilla duplicates, range overflow and concurrent edits abort.\nOnly the known vanilla outlier 251780 is excluded from the maximum calculation; it stays reserved.");
+            Console.WriteLine("\nOptions:\n  --target FOLDER    Target folder (direct .json children only)\n  --vanilla FOLDER   Use a fresh vanilla strings extraction instead of built-in 3.4\n  --backup-folder FOLDER  Backup root outside localization/game data\n  --start NUMBER     First custom ID (default 30000, or above a newer reference)\n  --dry-run          Preview only; write nothing\n  --apply --yes      Apply without an interactive prompt; backups remain mandatory\n  --help            Show this help\n\nThe seven established filenames come first; additional filenames follow alphabetically.\nCustom IDs stop at 65534 for native 16-bit field compatibility.\nMalformed JSON, ambiguous vanilla duplicates, range overflow and concurrent edits abort.\nOnly the known vanilla outlier 251780 is excluded from the maximum calculation; it stays reserved.");
         }
         public static int Main(string[] args)
         {
@@ -493,7 +563,7 @@ namespace D2RLocalizationCompactor
             try
             {
                 Console.OutputEncoding = new UTF8Encoding(false);
-                string target = AppDomain.CurrentDomain.BaseDirectory, vanilla = null; int? start = null;
+                string target = AppDomain.CurrentDomain.BaseDirectory, vanilla = null, backup = null; int? start = null;
                 bool dry = false, apply = false, yes = false;
                 for (int i = 0; i < args.Length; ++i)
                 {
@@ -502,17 +572,17 @@ namespace D2RLocalizationCompactor
                     if (arg == "--dry-run") dry = true;
                     else if (arg == "--apply") apply = true;
                     else if (arg == "--yes") yes = true;
-                    else if (arg == "--target" || arg == "--vanilla" || arg == "--start")
+                    else if (arg == "--target" || arg == "--vanilla" || arg == "--start" || arg == "--backup-folder")
                     {
                         if (++i >= args.Length) throw new ArgumentException("Missing value for " + arg);
-                        if (arg == "--target") target = args[i]; else if (arg == "--vanilla") vanilla = args[i];
+                        if (arg == "--target") target = args[i]; else if (arg == "--vanilla") vanilla = args[i]; else if (arg == "--backup-folder") backup = args[i];
                         else { int parsed; if (!int.TryParse(args[i], NumberStyles.None, CultureInfo.InvariantCulture, out parsed)) throw new ArgumentException("Invalid starting ID."); start = parsed; }
                     }
                     else throw new ArgumentException("Unknown option: " + arg + ". Use --help.");
                 }
                 if (dry && (apply || yes)) throw new ArgumentException("--dry-run cannot be combined with --apply or --yes.");
                 if (yes && !apply) throw new ArgumentException("Use --apply together with --yes.");
-                Console.WriteLine("D2R Localization ID Compactor 1.0.1 - MadMike");
+                Console.WriteLine("D2R Localization ID Compactor 1.0.2 - MadMike");
                 if (interactive)
                 {
                     target = Ask("Target strings folder", target);
@@ -520,6 +590,8 @@ namespace D2RLocalizationCompactor
                     if (!referencePath.Equals("BUILTIN", StringComparison.OrdinalIgnoreCase)) vanilla = referencePath;
                 }
                 target = Folder(target); if (vanilla != null) vanilla = Folder(vanilla);
+                if (interactive) backup = Ask("Backup folder (must be outside game data)", Engine.DefaultBackupRoot(target));
+                if (backup != null) backup = Folder(backup);
                 if (vanilla != null && string.Equals(target.TrimEnd('\\', '/'), vanilla.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Target and vanilla reference must be different folders.");
                 Reference reference = Reference.Load(vanilla);
                 long suggested = Math.Max(30000L, (((long)reference.Maximum + 1 + 999) / 1000) * 1000);
@@ -529,15 +601,15 @@ namespace D2RLocalizationCompactor
                     if (!int.TryParse(answer, NumberStyles.None, CultureInfo.InvariantCulture, out parsed)) throw new ArgumentException("Invalid starting ID."); start = parsed;
                 }
                 if (!start.HasValue) { if (suggested > Engine.MaximumId) throw new InvalidDataException("The reference leaves no supported custom ID range; review its outliers."); start = (int)suggested; }
-                Plan plan = Engine.Build(target, reference, start.Value); Engine.Preview(plan);
+                Plan plan = Engine.Build(target, reference, start.Value, backup); Engine.Preview(plan);
                 if (dry) Console.WriteLine("\nPreview only. No files were written.");
-                else if (plan.Changed == 0) Console.WriteLine("\nNo ID changes are needed.");
+                else if (plan.Changed == 0 && plan.LegacyBackup == null) Console.WriteLine("\nNo ID changes are needed.");
                 else
                 {
                     if (!yes)
                     {
                         if (Console.IsInputRedirected) throw new ArgumentException("Use --dry-run to preview, or --apply --yes to write with backups.");
-                        Console.Write("\nType APPLY (any letter case) to back up all scanned JSON files and apply this plan: ");
+                        Console.Write("\nType APPLY (any letter case) to relocate old backups if needed, back up scanned JSON and apply this plan: ");
                         if (!string.Equals((Console.ReadLine() ?? "").Trim(), "APPLY", StringComparison.OrdinalIgnoreCase)) { Console.WriteLine("Cancelled. No files were written."); return 0; }
                     }
                     Engine.Apply(plan);

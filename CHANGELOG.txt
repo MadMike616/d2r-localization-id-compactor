@@ -1,3 +1,10 @@
+1.0.2
+- Store backups and JSON reports outside localization and game-data folders.
+- Prevent backup destinations inside game data or the vanilla reference tree.
+- Offer relocation of verified legacy compactor backups during apply, including
+  when all active IDs are already compacted.
+- Allow selecting an external backup folder interactively or with --backup-folder.
+
 1.0.1
 - Command-line option names accept any letter case.
 - The apply confirmation accepts any letter case and surrounding spaces.
