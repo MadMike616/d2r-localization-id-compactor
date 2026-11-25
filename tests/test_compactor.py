@@ -36,15 +36,17 @@ class CompactorTests(unittest.TestCase):
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
         return path
 
-    def run_tool(self, *args, builtin=False):
+    def run_tool(self, *args, builtin=False, rune_mode='compact'):
         command = [str(ARGS.exe), '--target', str(self.target)]
         if not builtin:
             command += ['--vanilla', str(self.reference)]
+        if rune_mode is not None:
+            command += ['--item-runes-mode', rune_mode]
         return subprocess.run(command + list(args), stdin=subprocess.DEVNULL, capture_output=True,
                               encoding='utf-8-sig', errors='strict', timeout=50)
 
-    def apply(self, *args, builtin=False):
-        result = self.run_tool(*args, '--apply', '--yes', builtin=builtin)
+    def apply(self, *args, builtin=False, rune_mode='compact'):
+        result = self.run_tool(*args, '--apply', '--yes', builtin=builtin, rune_mode=rune_mode)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
 
@@ -256,6 +258,103 @@ class CompactorTests(unittest.TestCase):
         result = self.run_tool('--start', '65000', '--apply', '--yes')
         self.assertEqual(result.returncode, 1)
         self.assertIn('exceed 65534', result.stderr)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.manifests(), [])
+
+    def test_item_runes_mode_is_required_without_an_automatic_default(self):
+        self.write('item-runes.json', [row(29001, 'Runeword238')])
+        self.write('other.json', [row(5, 'Custom')])
+        before = self.snapshot()
+        for options in [('--dry-run',), ('--apply', '--yes')]:
+            result = self.run_tool(*options, rune_mode=None)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn('--item-runes-mode preserve', result.stderr)
+            self.assertEqual(self.snapshot(), before)
+            self.assertEqual(self.manifests(), [])
+
+    def test_preserve_item_runes_keeps_bytes_and_reserves_both_clusters(self):
+        text = '[\r\n // Keep this file exactly\r\n {"id":29001,"Key":"Shortcut","enUS":"短路"},\r\n {"id":29003,"Key":"Sunder","enUS":"Sunder"},\r\n {"id":53500,"Key":"Distortion","enUS":"Distortion"},\r\n]\r\n'
+        raw = codecs.BOM_UTF16_LE + text.encode('utf-16-le')
+        runes = self.target / 'ITEM-RUNES.JSON'
+        runes.write_bytes(raw)
+        self.write('item-modifiers.json', [row(5, 'CustomModifier')])
+        self.write('other.json', [row(6, 'CustomOther')])
+        result = self.apply('--ItEm-RuNeS-MoDe', 'pReSeRvE')
+        self.assertEqual(runes.read_bytes(), raw)
+        self.assertEqual(self.ids('item-modifiers.json'), [31000])
+        self.assertEqual(self.ids('other.json'), [32000])
+        self.assertIn('28001-30003', result.stdout)
+        self.assertIn('52500-54500', result.stdout)
+        manifest_path, = self.manifests()
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        self.assertEqual(manifest['itemRunesMode'], 'preserve')
+        self.assertEqual(manifest['itemRunesBuffer'], 1000)
+        self.assertEqual(manifest['reservedItemRunesIntervals'],
+                         [{'first': 28001, 'last': 30003}, {'first': 52500, 'last': 54500}])
+        with (manifest_path.parent / 'preserved-item-runes.csv').open(encoding='utf-8-sig', newline='') as stream:
+            self.assertEqual([int(r['ID']) for r in csv.DictReader(stream)], [29001, 29003, 53500])
+        with (manifest_path.parent / 'old-to-new-ids.csv').open(encoding='utf-8-sig', newline='') as stream:
+            self.assertNotIn('ITEM-RUNES.JSON', {r['File'] for r in csv.DictReader(stream)})
+        before = self.snapshot()
+        result = self.apply(rune_mode='preserve')
+        self.assertIn('No ID changes are needed', result.stdout)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(len(self.manifests()), 1)
+
+    def test_item_runes_buffer_includes_exactly_1000_on_either_side(self):
+        self.write('item-runes.json', [row(32000, 'CustomWord')])
+        self.write('extra.json', [row(5, 'Custom')])
+        for start, expected in [(30999, 30999), (31000, 34000), (32000, 34000),
+                                (33000, 34000), (33001, 33001)]:
+            with self.subTest(start=start):
+                result = self.run_tool('--start', str(start), '--dry-run', rune_mode='preserve')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertRegex(result.stdout, rf'extra\.json\s+{expected}-{expected}')
+        self.assertFalse(self.backup_root.exists())
+
+    def test_whole_consecutive_range_moves_past_item_runes_buffer(self):
+        self.write('item-runes.json', [row(32000, 'CustomWord')])
+        self.write('item-names.json', [row(100 + i, 'Name' + str(i)) for i in range(1001)])
+        self.apply(rune_mode='preserve')
+        self.assertEqual(self.ids('item-names.json'), list(range(34000, 35001)))
+        self.assertEqual(self.ids('item-runes.json'), [32000])
+
+    def test_later_file_obeys_spacing_and_moves_after_merged_buffers(self):
+        self.write('item-runes.json', [row(33000, 'One'), row(33500, 'Two')])
+        self.write('item-modifiers.json', [row(5, 'Modifier')])
+        self.write('skills.json', [row(6, 'Skill')])
+        self.apply('--start', '31000', rune_mode='preserve')
+        self.assertEqual(self.ids('item-modifiers.json'), [31000])
+        self.assertEqual(self.ids('skills.json'), [35000])
+
+    def test_item_runes_buffer_overflow_stops_before_any_writes(self):
+        self.write('item-runes.json', [row(65534, 'LastWord')])
+        self.write('extra.json', [row(5, 'Custom')])
+        before = self.snapshot()
+        result = self.run_tool('--start', '65000', '--apply', '--yes', rune_mode='preserve')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('item-runes safety buffers', result.stderr)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.manifests(), [])
+
+    def test_compact_item_runes_is_explicit_and_does_not_reserve_buffers(self):
+        self.write('item-runes.json', [row(29001, 'CustomWord')])
+        self.write('skills.json', [row(5, 'CustomSkill')])
+        result = self.apply('--ITEM-RUNES-MODE', 'CoMpAcT')
+        self.assertEqual(self.ids('item-runes.json'), [30000])
+        self.assertEqual(self.ids('skills.json'), [31000])
+        self.assertIn('NO existing character or shared-stash saves', result.stdout)
+        manifest_path, = self.manifests()
+        manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        self.assertEqual(manifest['itemRunesMode'], 'compact')
+        self.assertEqual(manifest['reservedItemRunesIntervals'], [])
+
+    def test_invalid_item_runes_mode_is_rejected(self):
+        self.write('item-runes.json', [row(29001, 'CustomWord')])
+        before = self.snapshot()
+        result = self.run_tool('--apply', '--yes', rune_mode='automatic')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('mode must be PRESERVE', result.stderr)
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.manifests(), [])
 

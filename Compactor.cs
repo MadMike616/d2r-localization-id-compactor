@@ -14,9 +14,9 @@ using System.Web.Script.Serialization;
 [assembly: AssemblyCompany("MadMike")]
 [assembly: AssemblyProduct("D2R Localization ID Compactor")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 MadMike")]
-[assembly: AssemblyVersion("1.0.2.0")]
-[assembly: AssemblyFileVersion("1.0.2.0")]
-[assembly: AssemblyInformationalVersion("1.0.2")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyInformationalVersion("1.1.0")]
 
 namespace D2RLocalizationCompactor
 {
@@ -144,7 +144,7 @@ namespace D2RLocalizationCompactor
     {
         public string Key;
         public int Id, Index, Start, End;
-        public bool Preserved;
+        public bool Preserved, Native, ProtectedRune;
         public string Reason;
     }
     internal sealed class Document
@@ -247,12 +247,19 @@ namespace D2RLocalizationCompactor
         public string File, Key;
         public int Index, OldId, NewId;
     }
+    internal enum ItemRunesMode { Unspecified, Preserve, Compact }
+    internal sealed class IdRange
+    {
+        public long First, Last;
+    }
     internal sealed class Plan
     {
         public string Target;
         public string BackupRoot, LegacyBackup;
         public Reference Reference;
         public int Start, Changed;
+        public ItemRunesMode ItemRunesMode;
+        public readonly List<IdRange> RuneBuffers = new List<IdRange>();
         public List<Document> Documents;
         public readonly List<Change> Mapping = new List<Change>();
         public readonly Dictionary<int, List<string>> VanillaDuplicates = new Dictionary<int, List<string>>();
@@ -262,6 +269,7 @@ namespace D2RLocalizationCompactor
     internal static class Engine
     {
         public const int MaximumId = 65534;
+        public const int RuneBuffer = 1000;
         private static readonly string[] FirstFiles = { "item-gems.json", "item-modifiers.json", "item-nameaffixes.json", "item-names.json", "item-runes.json", "skills.json", "ui.json" };
         public static string[] JsonFiles(string folder)
         {
@@ -320,7 +328,31 @@ namespace D2RLocalizationCompactor
             return root;
         }
         public static string Hash(byte[] value) { using (SHA256 sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(value)).Replace("-", "").ToLowerInvariant(); }
-        public static Plan Build(string target, Reference reference, int start, string backupFolder)
+        private static bool IsItemRunes(Document doc) { return string.Equals(doc.Name, "item-runes.json", StringComparison.OrdinalIgnoreCase); }
+        private static void ReserveRunes(Plan plan)
+        {
+            if (plan.ItemRunesMode != ItemRunesMode.Preserve) return;
+            foreach (Record row in plan.Documents.Where(IsItemRunes).Where(d => d.Records != null).SelectMany(d => d.Records).OrderBy(r => r.Id))
+            {
+                long first = Math.Max(0L, (long)row.Id - RuneBuffer), last = Math.Min((long)MaximumId, (long)row.Id + RuneBuffer);
+                if (first > last) continue;
+                IdRange previous = plan.RuneBuffers.LastOrDefault();
+                if (previous != null && first <= previous.Last + 1) previous.Last = Math.Max(previous.Last, last);
+                else plan.RuneBuffers.Add(new IdRange { First = first, Last = last });
+            }
+        }
+        private static long SafeRangeStart(Plan plan, long cursor, int count)
+        {
+            if (count == 0) return cursor;
+            foreach (IdRange buffer in plan.RuneBuffers)
+            {
+                if (cursor + count - 1 < buffer.First) break;
+                if (cursor <= buffer.Last) cursor = ((buffer.Last + 1 + 999) / 1000) * 1000;
+            }
+            if (cursor + count - 1 > MaximumId) throw new InvalidDataException("The planned ranges exceed " + MaximumId + ", including any item-runes safety buffers. Reduce the starting ID or the number of entries. No files have been changed.");
+            return cursor;
+        }
+        public static Plan Build(string target, Reference reference, int start, string backupFolder, ItemRunesMode itemRunesMode)
         {
             if (start <= reference.Maximum || start < 0 || start > MaximumId) throw new InvalidDataException("Starting ID must be above the vanilla maximum " + reference.Maximum + " and at most " + MaximumId + ".");
             string[] files = JsonFiles(target);
@@ -329,7 +361,10 @@ namespace D2RLocalizationCompactor
             ValidateBackupRoot(target, backupRoot);
             if (reference.SourceFolder != null && Within(backupRoot, DataBoundary(reference.SourceFolder).FullName)) throw new InvalidDataException("The backup folder must be outside the vanilla reference tree.");
             var plan = new Plan { Target = target, Reference = reference, Start = start, BackupRoot = backupRoot,
-                LegacyBackup = FindLegacyBackup(target), Documents = files.Select(Document.Read).ToList() };
+                LegacyBackup = FindLegacyBackup(target), Documents = files.Select(Document.Read).ToList(), ItemRunesMode = itemRunesMode };
+            if (plan.ItemRunesMode == ItemRunesMode.Unspecified && plan.Documents.Any(d => IsItemRunes(d) && d.Records != null))
+                throw new InvalidDataException("Choose --item-runes-mode preserve for existing characters/shared stashes, or --item-runes-mode compact for a clean mod with no saves. No mode is selected automatically.");
+            ReserveRunes(plan);
             var finalIds = new Dictionary<int, List<string>>();
             long cursor = start;
             foreach (Document doc in plan.Documents)
@@ -354,6 +389,16 @@ namespace D2RLocalizationCompactor
                         if (reference.Global.TryGetValue(row.Id, out globalKeys) && globalKeys.Contains(row.Key)) { row.Preserved = true; row.Reason = "Vanilla ID/key override in another file"; }
                     }
                 }
+                foreach (Record row in doc.Records)
+                {
+                    row.Native = row.Preserved;
+                    if (plan.ItemRunesMode == ItemRunesMode.Preserve && IsItemRunes(doc))
+                    {
+                        row.ProtectedRune = true; row.Preserved = true;
+                        row.Reason = row.Native ? row.Reason + "; item-runes ID preserved" : "Item-runes ID preserved for saved-item compatibility";
+                    }
+                }
+                cursor = SafeRangeStart(plan, cursor, doc.Records.Count(r => !r.Preserved));
                 foreach (Record row in doc.Records)
                 {
                     int id = row.Id;
@@ -411,14 +456,25 @@ namespace D2RLocalizationCompactor
             Console.WriteLine("Backup folder (outside game data): " + plan.BackupRoot);
             if (plan.LegacyBackup != null) Console.WriteLine("Old backups inside game data will be relocated: " + plan.LegacyBackup);
             Console.WriteLine("Vanilla maximum: " + plan.Reference.Maximum + " (251780 excluded from the maximum; its ID remains reserved)");
+            if (plan.Documents.Any(d => IsItemRunes(d) && d.Records != null))
+            {
+                Console.WriteLine("item-runes mode: " + plan.ItemRunesMode.ToString().ToUpperInvariant());
+                if (plan.ItemRunesMode == ItemRunesMode.Preserve)
+                {
+                    Console.WriteLine("item-runes.json stays unchanged. Other custom ranges avoid every item-runes ID and 1000 numbers on either side.");
+                    foreach (IdRange buffer in plan.RuneBuffers) Console.WriteLine("  Reserved ID interval: " + buffer.First + "-" + buffer.Last);
+                }
+                else Console.WriteLine("COMPACT is for a clean mod with NO existing character or shared-stash saves. Runeword name IDs stored in saved items can become invalid.");
+            }
             Console.WriteLine("\nFile                            Custom range          IDs changing");
             foreach (Document doc in plan.Documents)
-                Console.WriteLine("{0,-31} {1,-21} {2}", doc.Name, doc.SkipReason != null ? "Skipped" : doc.First.HasValue ? doc.First + "-" + doc.Last : "Vanilla only", doc.Changed);
+                Console.WriteLine("{0,-31} {1,-21} {2}", doc.Name, doc.SkipReason != null ? "Skipped" : doc.First.HasValue ? doc.First + "-" + doc.Last : "Preserved only", doc.Changed);
             foreach (Document doc in plan.Documents.Where(d => d.SkipReason != null)) Console.WriteLine("  Skipped " + doc.Name + ": " + doc.SkipReason);
             Console.WriteLine("\n" + plan.Mapping.Count + " custom records; " + plan.Changed + " IDs will change.");
             Console.WriteLine("Vanilla duplicate/override ID groups preserved: " + plan.VanillaDuplicates.Count);
             foreach (var pair in plan.VanillaDuplicates) Console.WriteLine("  " + pair.Key + ": " + string.Join("; ", pair.Value));
             Console.WriteLine("Each following custom range starts at a multiple of 1000 at least 300 above the preceding last ID.");
+            if (plan.RuneBuffers.Count > 0) Console.WriteLine("A range intersecting an item-runes buffer moves as a whole to the next safe multiple of 1000, including the first range if needed.");
             Console.WriteLine("Only JSON ID numbers change. Fixed numeric references in plugins or other game files are not updated.");
         }
         private static string Csv(string value)
@@ -438,9 +494,11 @@ namespace D2RLocalizationCompactor
         }
         private static object Manifest(Plan plan, string status, string message)
         {
-            return new { tool = "D2R Localization ID Compactor", version = "1.0.2", utc = DateTime.UtcNow.ToString("o"),
+            return new { tool = "D2R Localization ID Compactor", version = "1.1.0", utc = DateTime.UtcNow.ToString("o"),
                 status = status, message = message, target = plan.Target, reference = plan.Reference.Description,
                 startingId = plan.Start, minimumBoundaryDistance = 300, changedIds = plan.Changed, backupRoot = plan.BackupRoot,
+                itemRunesMode = plan.ItemRunesMode.ToString().ToLowerInvariant(), itemRunesBuffer = plan.ItemRunesMode == ItemRunesMode.Preserve ? RuneBuffer : 0,
+                reservedItemRunesIntervals = plan.RuneBuffers.Select(r => new { first = r.First, last = r.Last }).ToArray(),
                 files = plan.Documents.Select(d => new { name = d.Name, originalSha256 = Hash(d.Original), outputSha256 = Hash(d.Output),
                     records = d.Records == null ? 0 : d.Records.Count, changingIds = d.Changed, firstCustomId = d.First, lastCustomId = d.Last, skipped = d.SkipReason }).ToArray(),
                 preservedVanillaDuplicateGroups = plan.VanillaDuplicates.ToDictionary(p => p.Key.ToString(CultureInfo.InvariantCulture), p => p.Value) };
@@ -481,8 +539,11 @@ namespace D2RLocalizationCompactor
             foreach (Change change in plan.Mapping) mapping.Append(Csv(change.File)).Append(',').Append(change.Index).Append(',').Append(Csv(change.Key)).Append(',').Append(change.OldId).Append(',').Append(change.NewId).Append("\r\n");
             File.WriteAllText(System.IO.Path.Combine(plan.Backup, "old-to-new-ids.csv"), mapping.ToString(), new UTF8Encoding(true));
             var preserved = new StringBuilder("File,EntryIndex,Key,ID,Reason\r\n");
-            foreach (Document doc in plan.Documents.Where(d => d.Records != null)) foreach (Record row in doc.Records.Where(r => r.Preserved)) preserved.Append(Csv(doc.Name)).Append(',').Append(row.Index).Append(',').Append(Csv(row.Key)).Append(',').Append(row.Id).Append(',').Append(Csv(row.Reason)).Append("\r\n");
+            foreach (Document doc in plan.Documents.Where(d => d.Records != null)) foreach (Record row in doc.Records.Where(r => r.Native)) preserved.Append(Csv(doc.Name)).Append(',').Append(row.Index).Append(',').Append(Csv(row.Key)).Append(',').Append(row.Id).Append(',').Append(Csv(row.Reason)).Append("\r\n");
             File.WriteAllText(System.IO.Path.Combine(plan.Backup, "preserved-vanilla.csv"), preserved.ToString(), new UTF8Encoding(true));
+            var runes = new StringBuilder("File,EntryIndex,Key,ID,Reason\r\n");
+            foreach (Document doc in plan.Documents.Where(d => d.Records != null)) foreach (Record row in doc.Records.Where(r => r.ProtectedRune)) runes.Append(Csv(doc.Name)).Append(',').Append(row.Index).Append(',').Append(Csv(row.Key)).Append(',').Append(row.Id).Append(',').Append(Csv(row.Reason)).Append("\r\n");
+            File.WriteAllText(System.IO.Path.Combine(plan.Backup, "preserved-item-runes.csv"), runes.ToString(), new UTF8Encoding(true));
             SaveManifest(plan, "Prepared", "All original JSON files backed up and verified. No active files changed yet.");
             Console.WriteLine("\nVerified backups: " + plan.Backup);
             var temps = new Dictionary<Document, string>(); var committed = new List<Document>();
@@ -537,12 +598,31 @@ namespace D2RLocalizationCompactor
     {
         private static string Folder(string input) { return System.IO.Path.GetFullPath(Environment.ExpandEnvironmentVariables(input.Trim().Trim('"'))); }
         private static string Ask(string label, string value) { Console.Write(label + " [" + value + "]: "); string answer = Console.ReadLine(); return string.IsNullOrWhiteSpace(answer) ? value : answer.Trim(); }
+        private static ItemRunesMode ParseItemRunesMode(string value)
+        {
+            if (string.Equals(value.Trim(), "preserve", StringComparison.OrdinalIgnoreCase) || value.Trim() == "1") return ItemRunesMode.Preserve;
+            if (string.Equals(value.Trim(), "compact", StringComparison.OrdinalIgnoreCase) || value.Trim() == "2") return ItemRunesMode.Compact;
+            throw new ArgumentException("Item-runes mode must be PRESERVE (existing characters/shared stashes) or COMPACT (clean mod with no saves).");
+        }
+        private static ItemRunesMode AskItemRunesMode()
+        {
+            Console.WriteLine("\nChoose how to handle item-runes.json (no default):");
+            Console.WriteLine("  1 / PRESERVE: Existing characters or shared stashes. Keep item-runes IDs and reserve 1000 numbers on both sides.");
+            Console.WriteLine("  2 / COMPACT:  Clean mod with no saves. Renumber custom item-runes IDs too.");
+            for (;;)
+            {
+                Console.Write("Enter PRESERVE or COMPACT: "); string answer = Console.ReadLine();
+                if (answer == null) throw new ArgumentException("No item-runes mode selected. No files were changed.");
+                try { return ParseItemRunesMode(answer); }
+                catch (ArgumentException error) { Console.WriteLine(error.Message); }
+            }
+        }
         private static void Help()
         {
-            Console.WriteLine("D2R Localization ID Compactor 1.0.2 - MadMike\n");
+            Console.WriteLine("D2R Localization ID Compactor 1.1.0 - MadMike\n");
             Console.WriteLine("Double-click to choose a folder, preview the ranges, then type APPLY to proceed.");
             Console.WriteLine("The default target is the folder containing this executable.");
-            Console.WriteLine("\nOptions:\n  --target FOLDER    Target folder (direct .json children only)\n  --vanilla FOLDER   Use a fresh vanilla strings extraction instead of built-in 3.4\n  --backup-folder FOLDER  Backup root outside localization/game data\n  --start NUMBER     First custom ID (default 30000, or above a newer reference)\n  --dry-run          Preview only; write nothing\n  --apply --yes      Apply without an interactive prompt; backups remain mandatory\n  --help            Show this help\n\nThe seven established filenames come first; additional filenames follow alphabetically.\nCustom IDs stop at 65534 for native 16-bit field compatibility.\nMalformed JSON, ambiguous vanilla duplicates, range overflow and concurrent edits abort.\nOnly the known vanilla outlier 251780 is excluded from the maximum calculation; it stays reserved.");
+            Console.WriteLine("\nOptions:\n  --target FOLDER    Target folder (direct .json children only)\n  --vanilla FOLDER   Use a fresh vanilla strings extraction instead of built-in 3.4\n  --backup-folder FOLDER  Backup root outside localization/game data\n  --item-runes-mode preserve|compact  Required if item-runes.json has numeric IDs\n  --start NUMBER     First custom ID (default 30000, or above a newer reference)\n  --dry-run          Preview only; write nothing\n  --apply --yes      Apply without an interactive prompt; backups remain mandatory\n  --help            Show this help\n\nPRESERVE keeps item-runes.json unchanged with a 1000-ID buffer on both sides of every ID.\nCOMPACT renumbers its custom IDs too; use only for a clean mod with no character/shared-stash saves.\nOption names, mode values and APPLY ignore letter case.\nThe seven established filenames come first; additional filenames follow alphabetically.\nCustom IDs stop at 65534 for native 16-bit field compatibility.\nMalformed JSON, ambiguous vanilla duplicates, range overflow and concurrent edits abort.\nOnly the known vanilla outlier 251780 is excluded from the maximum calculation; it stays reserved.");
         }
         public static int Main(string[] args)
         {
@@ -564,6 +644,7 @@ namespace D2RLocalizationCompactor
             {
                 Console.OutputEncoding = new UTF8Encoding(false);
                 string target = AppDomain.CurrentDomain.BaseDirectory, vanilla = null, backup = null; int? start = null;
+                ItemRunesMode itemRunesMode = ItemRunesMode.Unspecified;
                 bool dry = false, apply = false, yes = false;
                 for (int i = 0; i < args.Length; ++i)
                 {
@@ -572,17 +653,18 @@ namespace D2RLocalizationCompactor
                     if (arg == "--dry-run") dry = true;
                     else if (arg == "--apply") apply = true;
                     else if (arg == "--yes") yes = true;
-                    else if (arg == "--target" || arg == "--vanilla" || arg == "--start" || arg == "--backup-folder")
+                    else if (arg == "--target" || arg == "--vanilla" || arg == "--start" || arg == "--backup-folder" || arg == "--item-runes-mode")
                     {
                         if (++i >= args.Length) throw new ArgumentException("Missing value for " + arg);
                         if (arg == "--target") target = args[i]; else if (arg == "--vanilla") vanilla = args[i]; else if (arg == "--backup-folder") backup = args[i];
+                        else if (arg == "--item-runes-mode") itemRunesMode = ParseItemRunesMode(args[i]);
                         else { int parsed; if (!int.TryParse(args[i], NumberStyles.None, CultureInfo.InvariantCulture, out parsed)) throw new ArgumentException("Invalid starting ID."); start = parsed; }
                     }
                     else throw new ArgumentException("Unknown option: " + arg + ". Use --help.");
                 }
                 if (dry && (apply || yes)) throw new ArgumentException("--dry-run cannot be combined with --apply or --yes.");
                 if (yes && !apply) throw new ArgumentException("Use --apply together with --yes.");
-                Console.WriteLine("D2R Localization ID Compactor 1.0.2 - MadMike");
+                Console.WriteLine("D2R Localization ID Compactor 1.1.0 - MadMike");
                 if (interactive)
                 {
                     target = Ask("Target strings folder", target);
@@ -601,7 +683,8 @@ namespace D2RLocalizationCompactor
                     if (!int.TryParse(answer, NumberStyles.None, CultureInfo.InvariantCulture, out parsed)) throw new ArgumentException("Invalid starting ID."); start = parsed;
                 }
                 if (!start.HasValue) { if (suggested > Engine.MaximumId) throw new InvalidDataException("The reference leaves no supported custom ID range; review its outliers."); start = (int)suggested; }
-                Plan plan = Engine.Build(target, reference, start.Value, backup); Engine.Preview(plan);
+                if (interactive && Engine.JsonFiles(target).Any(p => string.Equals(System.IO.Path.GetFileName(p), "item-runes.json", StringComparison.OrdinalIgnoreCase))) itemRunesMode = AskItemRunesMode();
+                Plan plan = Engine.Build(target, reference, start.Value, backup, itemRunesMode); Engine.Preview(plan);
                 if (dry) Console.WriteLine("\nPreview only. No files were written.");
                 else if (plan.Changed == 0 && plan.LegacyBackup == null) Console.WriteLine("\nNo ID changes are needed.");
                 else

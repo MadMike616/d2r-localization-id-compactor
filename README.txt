@@ -1,4 +1,4 @@
-D2R Localization ID Compactor 1.0.2
+D2R Localization ID Compactor 1.1.0
 Author: MadMike
 License: MIT
 
@@ -16,8 +16,10 @@ Close the game before applying a plan.
    Viewer. Use a separate, unmodified extraction for the reference.
 3. Accept the suggested backup folder outside game data, or choose another safe folder.
 4. Choose the first custom ID. The default is 30000 with the built-in reference.
-5. Review the file ranges, skipped files and preserved vanilla duplicates.
-6. Type apply in any letter case to proceed. Leading/trailing spaces are accepted.
+5. If item-runes.json is present, choose PRESERVE for existing characters/shared
+   stashes, or COMPACT for a clean mod with no saves. There is no default.
+6. Review the file ranges, skipped files and preserved vanilla duplicates.
+7. Type apply in any letter case to proceed. Leading/trailing spaces are accepted.
    Entering anything else cancels without writing files.
 
 WHAT GETS PROCESSED
@@ -66,6 +68,29 @@ vanilla maximum; its definition is still preserved and its number reserved.
 All other vanilla IDs count toward the maximum. With this reference the ordinary
 maximum is 28138. The starting ID must exceed the reference's ordinary maximum.
 
+ITEM-RUNES MODE
+
+PRESERVE keeps item-runes.json byte-for-byte unchanged. Other custom IDs must
+avoid every ID in that file and the 1000 numbers on either side. Overlapping
+buffers merge; space between distant buffers remains available. Vanilla IDs
+in other files stay fixed. Each consecutive custom range moves as a whole to
+the next safe multiple of 1000 if it would touch a buffer. This also applies
+to the first range, which can then begin above the requested starting ID.
+
+COMPACT renumbers custom item-runes.json entries too, without those buffers.
+Use it only for a clean mod with no existing character or shared-stash saves.
+Completed runeword items can retain numeric name IDs; changing those IDs can
+break references stored in existing items.
+
+The choice is required on every run when item-runes.json contains numeric IDs.
+It is not saved as a default. Mode values and option names ignore letter case.
+
+If an earlier version already renumbered item-runes.json and saves exist,
+close the game and restore that file from the original backup BEFORE choosing
+PRESERVE. Preserve protects the IDs currently in the selected file; it does
+not undo earlier compaction or migrate saved items. Test character loading
+and shared-stash items after any localization changes.
+
 Custom IDs are consecutive within each file, in existing entry order. The next
 file with custom entries starts at the smallest multiple of 1000 at least 300
 higher than the previous final ID:
@@ -110,6 +135,7 @@ incomplete old backup folders require manual review/moving.
 The same backup folder contains:
   old-to-new-ids.csv       File, record index, Key, old ID and new ID
   preserved-vanilla.csv   Preserved records and the classification reason
+  preserved-item-runes.csv  Records protected by Preserve mode
   manifest.json          Original/output hashes, ranges and completion status
 
 Temporary outputs are staged on the target volume. Files are replaced using
@@ -137,16 +163,20 @@ afterward. The tool does not launch D2RLoader or the game.
 COMMAND LINE
 
 Preview only; writes no files:
-  "D2R-Localization-ID-Compactor.exe" --target "<strings-folder>" --dry-run
+  "D2R-Localization-ID-Compactor.exe" --target "<strings-folder>" --item-runes-mode preserve --dry-run
 
 Apply with mandatory backups and no interactive prompt:
-  "D2R-Localization-ID-Compactor.exe" --target "<strings-folder>" --start 30000 --apply --yes
+  "D2R-Localization-ID-Compactor.exe" --target "<strings-folder>" --item-runes-mode preserve --start 30000 --apply --yes
 
 Use another vanilla extraction:
-  "D2R-Localization-ID-Compactor.exe" --target "<mod-strings>" --vanilla "<vanilla-strings>" --dry-run
+  "D2R-Localization-ID-Compactor.exe" --target "<mod-strings>" --vanilla "<vanilla-strings>" --item-runes-mode preserve --dry-run
 
 Select a backup root outside game data:
-  "D2R-Localization-ID-Compactor.exe" --target "<mod-strings>" --backup-folder "<external-backups>" --apply --yes
+  "D2R-Localization-ID-Compactor.exe" --target "<mod-strings>" --backup-folder "<external-backups>" --item-runes-mode preserve --apply --yes
+
+For a clean mod without saves, use --item-runes-mode compact instead.
+The option is mandatory when item-runes.json contains numeric IDs. For folders
+without that file, it can be omitted because it has no effect.
 
 Exit code 0 means successful completion, preview, cancellation or no changes
 needed. Exit code 1 means validation/write failure. CLI runs do not pause.

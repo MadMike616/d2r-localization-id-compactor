@@ -1,3 +1,12 @@
+1.1.0
+- Require an explicit choice to preserve item-runes.json IDs for existing saves
+  or compact its custom IDs for a clean mod with no character/shared-stash saves.
+- In preserve mode, keep item-runes.json unchanged and reserve 1000 numbers
+  above and below every one of its IDs when assigning other custom ranges.
+- Move any overlapping consecutive range as a whole to a safe multiple of 1000.
+- Include the selected mode, reserved ranges and preserved item-runes records
+  in the preview and backup reports.
+
 1.0.2
 - Store backups and JSON reports outside localization and game-data folders.
 - Prevent backup destinations inside game data or the vanilla reference tree.
