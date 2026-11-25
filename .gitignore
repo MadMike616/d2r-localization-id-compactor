@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.exe
+*.dll
+*.pdb
+*.tmp
+*.log
+.vs/
+bin/
+obj/
+out/
+release/
+test-output/
+Localization-ID-Backups/

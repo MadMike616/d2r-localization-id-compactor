@@ -1,0 +1,7 @@
+1.0.1
+- Command-line option names accept any letter case.
+- The apply confirmation accepts any letter case and surrounding spaces.
+
+1.0.0
+- Portable localization ID compaction with vanilla preservation, preview,
+  mandatory verified backups, ID mappings and rollback on write failure.

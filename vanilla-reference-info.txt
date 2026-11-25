@@ -1,0 +1,5 @@
+Vanilla D2R 3.4 localization ID/key reference.
+Files: 21
+Records: 12260
+Uncompressed reference SHA-256: ce9965e21b96d41e5e26968166684caed46b2d2a9657a69b2120f127399ea0d0
+Translations are not included.
